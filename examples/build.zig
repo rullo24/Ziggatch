@@ -11,9 +11,9 @@ pub fn build(b: *std.Build) !void {
     const optimise = b.standardOptimizeOption(.{});
     b.reference_trace = 10;
 
-    // defining import code as a module
-    const ziggatch_mod = b.addModule("ziggatch", .{
-        .root_source_file = b.path("../src/ziggatch.zig"),
+    // defining import code as a modules
+    const zga_mod = b.addModule("zga", .{
+        .root_source_file = b.path("../src/zga.zig"),
     });
 
     // creating an executable for each example
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) !void {
             });
 
             // linking libraries to and creating each executable
-            curr_exe.root_module.addImport("ziggatch", ziggatch_mod); // adding the zeys code to the example
+            curr_exe.root_module.addImport("zga", zga_mod); // adding the zeys code to the example
             b.installArtifact(curr_exe); // creating an artifact (exe) for each example
         }
     }
