@@ -8,6 +8,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
 
     // creating watchdog
-    const wd: zga.ZGA_WATCHDOG = try zga.createWatchdog();
-    try zga.initWatchdog(&wd, alloc);
+    var wd: zga.ZGA_WATCHDOG = .{}; 
+    try wd.init(alloc);
+    defer wd.close() catch {};
 }
