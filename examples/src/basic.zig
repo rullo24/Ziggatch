@@ -2,12 +2,12 @@ const std = @import("std");
 const zga = @import("ZGA");
 
 pub fn main() !void {
-    // allocator creation
+    // create heap allocato
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const alloc = gpa.allocator();
-    defer gpa.deinit();
+    const alloc: std.mem.Allocator = gpa.allocator();
+    defer _ = gpa.deinit();
 
     // creating watchdog
-    const temp = try zga.createWatchdog(alloc);
-    _ = temp;
+    const wd: zga.ZGA_WATCHDOG = try zga.createWatchdog();
+    try zga.initWatchdog(&wd, alloc);
 }

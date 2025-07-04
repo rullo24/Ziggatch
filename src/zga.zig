@@ -29,52 +29,41 @@ pub const ZGA_EVENT = struct {
 };
 
 // object used for concurrently capturing file changes
-pub const ZGA_WATCHDOG = struct {
-    const Self = @This();
-
+pub const ZGA_WATCHDOG: type = struct {
     has_been_init: bool = false,
     alloc: ?std.mem.Allocator = null,
-    backend: selectBackend(), // above func chooses target O/S file
+    backend: selectBackend() = selectBackend(){},
+    event_queue: ?tsq.createTSQ(ZGA_EVENT) = null,
+    error_queue: ?tsq.createTSQ(anyerror) = null,
 
-    event_queue: tsq.createTSQ(ZGA_EVENT),
-    error_queue: tsq.createTSQ(anyerror),
-
-    fn init(self: *Self, alloc: std.mem.Allocator) !Self {
-        if (self.has_been_init == true) return error.Already_Initialised;
-
-        // setting field declarations
+    fn init(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
+        if (self.has_been_init == true) return error.ALREADY_INITIALISED;
         self.alloc = alloc; // for freeing memory later
-        
-        // allocating thread-safe queue memory to heap --> to be freed on program close
-        self.event_queue = tsq.createTSQ(ZGA_EVENT);
-        self.event_queue.init(alloc, SIZE_EVENT_QUEUE);
-        self.error_queue = tsq.createTSQ(anyerror);
-        self.error_queue.init(alloc, SIZE_ERROR_QUEUE);
-
-        // flag so that other methods cannot be run before initialisation
-        self.has_been_init = true;
+        self.event_queue = try tsq.createTSQ(ZGA_EVENT).init(self.alloc.?, SIZE_EVENT_QUEUE);
+        self.error_queue = try tsq.createTSQ(anyerror).init(self.alloc.?, SIZE_ERROR_QUEUE);
+        self.has_been_init = true; // flag so that other methods cannot be run before initialisation
     }
 
     /// adding a directory to the obj watchlist
-    fn add(self: *Self) void {
-        // use std.meta.hasFn --> check if func available on target O/S
+    fn add(self: *ZGA_WATCHDOG) !void {
+        // use std.meta.hasfn --> check if func available on target o/s
         _ = self;
     }
 
     /// removing a directory from obj watchlist
-    fn remove(self: *Self) void {
-        // use std.meta.hasFn --> check if func available on target O/S
+    fn remove(self: *ZGA_WATCHDOG) !void {
+        // use std.meta.hasfn --> check if func available on target o/s
         _ = self;
     }
 
     /// printing the obj watchlist
-    fn watchList(self: *Self) void {
-        // use std.meta.hasFn --> check if func available on target O/S
+    fn watchlist(self: *ZGA_WATCHDOG) !void {
+        // use std.meta.hasfn --> check if func available on target o/s
         _ = self;
     }
 
-    fn close(self: *Self) !void {
-        if (self.has_been_init != true) return error.ZGA_Object_Not_Initialised;
+    fn close(self: *ZGA_WATCHDOG) !void {
+        if (self.has_been_init != true) return error.zga_object_not_initialised;
 
         // removing heap memory for thread-safe queues
         self.event_queue.deinit();
@@ -90,10 +79,13 @@ pub const ZGA_WATCHDOG = struct {
 // PUBLIC FUNCTION DECLARATIONS //
 //////////////////////////////////
 
-pub fn createWatchdog(alloc: std.mem.Allocator) !ZGA_WATCHDOG {
-    var wd: ZGA_WATCHDOG = .{}; // create obj
-    wd.init(alloc); // init using allocator that is passed --> heap allocation
+pub fn createWatchdog() !ZGA_WATCHDOG {
+    const wd: ZGA_WATCHDOG = .{}; 
     return wd;
+}
+
+pub fn initWatchdog(p_wd: *const ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
+    try @constCast(p_wd).*.init(alloc);
 }
 
 ///////////////////////////////////
@@ -105,6 +97,6 @@ fn selectBackend() type {
     switch(builtin.target.os.tag) {
         .windows => return _win,
         .linux => return _inotify,
-        else => @compileError("ZGA ERROR: Target O/S" ++ @tagName(builtin.os.tag) ++ "is not supported.\n"),
+        else => @compileError("ZGA ERROR: Target O/S" ++ @tagName(builtin.target.os.tag) ++ "is not supported.\n"),
     }
 }
