@@ -29,7 +29,20 @@ pub fn build(b: *std.Build) !void {
     ZGA_module.addImport("TSQ", TSQ_module);
     
     // building example executables
-    if (should_build_examples != true) { // TO BE CHANGED AFTER DONE DEBUGGING
+    
+    
+
+
+
+    // TO BE CHANGED AFTER DONE DEBUGGING (CURRENTLY should_build_examples set to opposite bool for easy building exes)
+
+
+
+
+
+
+
+    if (should_build_examples != true) { 
         const example_src_dir_path: []const u8 = b.pathFromRoot("examples/src");
         var example_dir = try std.fs.openDirAbsolute(example_src_dir_path, .{ .iterate = true }); // opening a directory obj
         defer example_dir.close(); // close file on build function end
