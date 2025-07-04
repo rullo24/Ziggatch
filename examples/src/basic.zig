@@ -1,5 +1,5 @@
 const std = @import("std");
-const zga = @import("zga");
+const zga = @import("ZGA");
 
 pub fn main() !void {
     // allocator creation
@@ -8,8 +8,6 @@ pub fn main() !void {
     defer gpa.deinit();
 
     // creating watchdog
-    const temp = zga.createWatchdog(alloc);
-    try temp.init(alloc);
-
-    defer temp.deinit();
+    const temp = try zga.createWatchdog(alloc);
+    _ = temp;
 }

@@ -8,7 +8,7 @@ const tsq = @import("TSQ");
 
 // local file imports
 const _win = @import("_win.zig");
-const _lini = @import("_linux_inotify.zig");
+const _inotify = @import("_inotify.zig");
 
 ///////////////////////////////
 // MAGIC NUMBER DECLARATIONS //
@@ -31,11 +31,10 @@ pub const ZGA_EVENT = struct {
 // object used for concurrently capturing file changes
 pub const ZGA_WATCHDOG = struct {
     const Self = @This();
-    const b = selectBackend(); // selects backend from target compiled O/S
 
     has_been_init: bool = false,
     alloc: ?std.mem.Allocator = null,
-    backend: b, // above func chooses target O/S file
+    backend: selectBackend(), // above func chooses target O/S file
 
     event_queue: tsq.createTSQ(ZGA_EVENT),
     error_queue: tsq.createTSQ(anyerror),
@@ -103,9 +102,9 @@ pub fn createWatchdog(alloc: std.mem.Allocator) !ZGA_WATCHDOG {
 
 // selects backend (methods to use) based on target architecture and O/S
 fn selectBackend() type {
-    switch(builtin.os.tag) {
+    switch(builtin.target.os.tag) {
         .windows => return _win,
-        .linux => return _lini,
+        .linux => return _inotify,
         else => @compileError("ZGA ERROR: Target O/S" ++ @tagName(builtin.os.tag) ++ "is not supported.\n"),
     }
 }
