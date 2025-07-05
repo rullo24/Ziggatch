@@ -24,11 +24,20 @@ pub fn main() !void {
     // UPDATE THE FLAGS SO THAT THERE ARE DEFAULT VALUES VIA ENUM OR SIMILAR
         // --> these should be converted to o/s specific flags or throw error if not available
 
-    const one_ms_to_ns: comptime_int = 1 * std.time.ns_per_ms;
-    while (true) {
-        try wd.read();
-        std.debug.print("hey\n", .{});
-        std.time.sleep(one_ms_to_ns);
-    }
 
+
+
+    // const one_ms_to_ns: comptime_int = 1 * std.time.ns_per_ms;
+    // while (true) {
+    //     try wd.read();
+    //     std.time.sleep(one_ms_to_ns);
+    //     const event: zga.ZGA_EVENT = wd.popEvent() catch continue; 
+    //     std.debug.print("{s}\n", .{event.name});
+    // }
+
+    const ex_watchlist = try wd.watchlist();
+    defer alloc.free(ex_watchlist);
+    for (ex_watchlist) |path| {
+        std.debug.print("{s}\n", .{path});
+    }
 }
