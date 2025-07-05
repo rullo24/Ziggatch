@@ -22,9 +22,8 @@ const SIZE_ERROR_QUEUE: usize = 64;
 
 // represents a change to filesystem
 pub const ZGA_EVENT = struct {
-    name: []const u8,
-    op: u32,
-    prev_name: []const u8,
+    name: []const u8 = "",
+    op: u32 = 0x0,
 };
 
 // object used for concurrently capturing file changes
@@ -45,9 +44,7 @@ pub const ZGA_WATCHDOG: type = struct {
     }
 
     /// adding a directory to the obj watchlist
-    pub fn add(self: *ZGA_WATCHDOG, path: []const u8) !void {
-        const flags: comptime_int = 0x0; // flags to be added here       
-
+    pub fn add(self: *ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
         if (std.meta.hasFn(zga_backend, "watchdogAdd")) { // check if func available on target o/s
             try zga_backend.watchdogAdd(self, path, flags);
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
@@ -60,22 +57,32 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
-    /// printing the obj watchlist
+    pub fn read(self: *ZGA_WATCHDOG) !void {
+        if (std.meta.hasFn(zga_backend, "watchdogRead") == false) return error.watchdogRead_FUNC_NOT_AVAIL_ON_OS; // check if func available on target o/s
+            zga_backend.watchdogRead(self) catch |read_err| {
+                if (read_err != error.WouldBlock) return read_err; // error.WouldBlock returned when no data is available (only return other errors)
+            };
+    }
+
+    pub fn popEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
+        if (self.event_queue == null) return error.EVENT_QUEUE_NULL;
+        const pop_event: ZGA_EVENT = self.event_queue.?.pop();
+        return pop_event;
+    }
+
+    pub fn popError(self: *ZGA_WATCHDOG) !anyerror {
+        if (self.error_queue == null) return error.ERROR_QUEUE_NULL;
+        const pop_err: ZGA_EVENT = self.error_queue.?.pop();
+        return pop_err;
+    }
+
     pub fn watchlist(self: *ZGA_WATCHDOG) !void {
         _ = self;
 
 
-        // TBD
+        // TBD --> return the files/dirs that are being watched currently
+        // --> get from O/S hashmaps
 
-
-
-    }
-
-    pub fn blockingPoll(self: *ZGA_WATCHDOG) !void {
-        
-
-        _ = self;
-        // TBD
 
 
     }
@@ -96,26 +103,6 @@ pub const ZGA_WATCHDOG: type = struct {
         }
         self.alloc = null; // deinit allocator
         self.has_been_init = false; // flipping flag back so that the struct can still exist but non-initialised
-    }
-
-    pub fn startThreadedPoll(self: *ZGA_WATCHDOG) !void {
-        
-
-        _ = self;
-        // TBD
-
-
-    }
-
-    pub fn stopThreadedPoll(self: *ZGA_WATCHDOG) !void {
-
-
-
-        _ = self;
-        // TBD
-
-
-
     }
 };
 

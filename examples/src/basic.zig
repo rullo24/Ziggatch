@@ -11,4 +11,24 @@ pub fn main() !void {
     var wd: zga.ZGA_WATCHDOG = .{}; 
     try wd.init(alloc);
     defer wd.close() catch {};
+
+    const example_name: []const u8 = "/home/kali/Desktop/Ziggatch/zig-out/bin";
+    try wd.add(example_name, 0x00000100);
+    try wd.remove(example_name);
+    try wd.add(example_name, 0x00000100);
+    try wd.remove(example_name);
+    try wd.add(example_name, 0x00000100);
+
+
+
+    // UPDATE THE FLAGS SO THAT THERE ARE DEFAULT VALUES VIA ENUM OR SIMILAR
+        // --> these should be converted to o/s specific flags or throw error if not available
+
+    const one_ms_to_ns: comptime_int = 1 * std.time.ns_per_ms;
+    while (true) {
+        try wd.read();
+        std.debug.print("hey\n", .{});
+        std.time.sleep(one_ms_to_ns);
+    }
+
 }
