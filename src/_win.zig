@@ -35,6 +35,10 @@ const DEFAULT_WIN32_FLAGS: win32.FileNotifyChangeFilter = .{};
 // PUBLIC FUNCTIONS //
 //////////////////////
 
+/// inits the internal Windows-specific data structures used by the watchdog.
+/// must be called before any other Windows-specific watchdog operations.
+///
+/// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
     if (p_wd.has_been_init == true) return error.WATCHDOG_ALREADY_INIT;
     if (p_wd.platform_vars.opt_hm_handle_to_path != null) return error.PATH_TO_HANDLE_HASHMAP_ALREADY_INIT;
@@ -53,12 +57,16 @@ pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
     }
 }
 
+/// adds a directory path to the watchlist
+///
+/// - `path`: UTF-8 path to the directory to watch.
+/// - `flags`: Bitmask of ZGA flags indicating which changes to monitor.
 pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
+    _ = flags; // unused in Windows version
+
     if (p_wd.alloc) |alloc| {
         const path_as_lpcwstr: [:0]const u16 = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
         defer alloc.free(path_as_lpcwstr);
-
-        _ = flags; // unused currently
 
         // only creating new handle if one doesn't already exist --> will only happen on first attempt
         if (p_wd.platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
@@ -81,6 +89,9 @@ pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, flags: u32) !void 
     } else return error.WATCHDOG_ALLOCATOR_NOT_DEFINED;
 }
 
+/// Removes a previously added path from the watchlist.
+///
+/// - `path`: UTF-8 path to remove from watching.
 pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
     // removing from handle --> path hashmap
     if (p_wd.platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
@@ -102,6 +113,9 @@ pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
     } else return error.HM_PATH_TO_HANDLE_NOT_INIT;
 }
 
+/// reads file change events from all watched directories and pushes them to the event queue.
+///
+/// - `zga_flags`: Bitmask of ZGA event flags to filter which changes are captured.
 pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
     // buf to hold handle event info
     var buf: [MAX_NUM_EVENTS_PER_READ]u8 align(@alignOf(win32.FILE_NOTIFY_INFORMATION)) = undefined; 
@@ -132,6 +146,7 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
 
             var offset: usize = 0; // init offset to iterate through the buffer of dir change events
             while (offset < bytes_returned) { // iterate over ea notify obj that is sent to buf of ReadDirectoryChangesW
+
                 // calc filename ptr for collecting the file that changes act on
                 const info: *win32.FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(&buf[offset]));
                 const info_filename_start_loc_p_int: usize = @intFromPtr(&info.FileNameLength) + @sizeOf(win32.DWORD);
@@ -160,6 +175,10 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
     }
 }
 
+/// cleans up all Windows-specific watchdog resources and internal structures.
+/// after this call, the watchdog must be re-initialised before use.
+///
+/// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) !void {
     if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
 
@@ -190,6 +209,9 @@ pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) !void {
 // PRIVATE FUNCTIONS //
 ///////////////////////
 
+/// converts a Windows file change filter to a cross-platform ZGA event flag bitmask.
+///
+/// - `win32_flags`: A Windows file change filter structure.
 fn win32ToZGAFlags(win32_flags: win32.FileNotifyChangeFilter) u32 {
     var zga_mask: u32 = 0x0;
 
@@ -204,6 +226,9 @@ fn win32ToZGAFlags(win32_flags: win32.FileNotifyChangeFilter) u32 {
     return zga_mask;
 }
 
+/// converts a ZGA event flag bitmask into a Windows-compatible file change filter.
+///
+/// - `zga_mask`: A bitmask composed of ZGA event flags.
 fn zgaToWin32Flags(zga_mask: u32) win32.FileNotifyChangeFilter {
     var win32_flags: win32.FileNotifyChangeFilter = .{};
 

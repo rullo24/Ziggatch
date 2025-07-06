@@ -119,7 +119,7 @@ pub const ZGA_WATCHDOG: type = struct {
             };
     }
 
-    pub fn popEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
+    pub fn popSingleEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
         self.event_queue_mutex.lock();
         defer self.event_queue_mutex.unlock();
 
@@ -129,7 +129,7 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.EVENT_QUEUE_NULL;
     }
 
-    pub fn popError(self: *ZGA_WATCHDOG) !anyerror {
+    pub fn popSingleError(self: *ZGA_WATCHDOG) !anyerror {
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
 
@@ -139,7 +139,7 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.ERROR_QUEUE_NULL;
     }
 
-    pub fn watchlist(self: *ZGA_WATCHDOG) ![][]const u8 {
+    pub fn getWatchlistAlloc(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) ![][]const u8 {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
         self.platform_vars_mutex.lock();
@@ -148,29 +148,30 @@ pub const ZGA_WATCHDOG: type = struct {
         defer self.alloc_mutex.unlock();
 
         if (self.has_been_init == false) return error.WD_HAS_NOT_BEEN_INIT; // return an error for a non-initialised array
-        if (self.alloc) |l_alloc| {
-            var wd_watchlist = std.ArrayList([]const u8).init(l_alloc);
-            switch (zga_backend) {
-                _inotify => {
-                    if (self.platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| {
-                        var hm_iterator = p_hm_path_to_wd.iterator();
-                        while (hm_iterator.next()) |hm_val| { // iterate over all hashmap values --> required for deinit watchdogs via inotify
-                            const curr_hm_val_str: []const u8 = hm_val.key_ptr.*; // collecting the key from the hashmap "Entry"
-                            try wd_watchlist.append(curr_hm_val_str);
-                        }
+        var wd_watchlist = std.ArrayList([]const u8).init(alloc);
+        switch (zga_backend) {
+            _inotify => {
+                if (self.platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| {
+                    var hm_iterator = p_hm_path_to_wd.iterator();
+                    while (hm_iterator.next()) |hm_val| { // iterate over all hashmap values --> required for deinit watchdogs via inotify
+                        const curr_hm_val_str: []const u8 = hm_val.key_ptr.*; // collecting the key from the hashmap "Entry"
+                        try wd_watchlist.append(curr_hm_val_str);
                     }
-                }, 
-                _win => {
-
-
-                    // TBD
-
-
-                }, 
-                else => @compileError("ERROR: invalid backend")
-            }
+                }
+            }, 
+            _win => {
+                if (self.platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
+                    var hm_iterator = p_hm_path_to_handle.iterator();
+                    while (hm_iterator.next()) |hm_val| {
+                        const curr_hm_val_str: []const u8 = hm_val.key_ptr.*; // collecting path key from hashmap "Entry"
+                        try wd_watchlist.append(curr_hm_val_str);
+                    }
+                }
+            }, 
+            else => @compileError("ERROR: invalid backend")
+        }
+        
         return wd_watchlist.toOwnedSlice(); // to be free'd externally
-        } else return error.INVALID_ALLOCATOR;
     }
 
     pub fn close(self: *ZGA_WATCHDOG) !void {
