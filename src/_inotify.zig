@@ -57,10 +57,13 @@ pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
     // init hashmap for storing watchdog ptrs
     if (p_wd.alloc) |l_alloc| {
         // init inotify file desc
-        const fd: i32 = try posix.inotify_init1(IN_NONBLOCK | IN_CLOEXEC); // def init
+        const fd: i32 = try posix.inotify_init1(IN_CLOEXEC); // synchronous (blocking)
+        errdefer std.posix.close(fd);
 
         const path_to_wd_hm = std.StringHashMap(i32).init(l_alloc);
+        errdefer path_to_wd_hm.deinit();
         const wd_to_path_hm = std.AutoHashMap(i32, []const u8).init(l_alloc);
+        errdefer wd_to_path_hm.deinit();
 
         // if no errors have occurred --> set values now
         p_wd.platform_vars.fd = fd; // setting fd in global iNotify vars
@@ -114,9 +117,11 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG) !void {
     if (p_wd.platform_vars.opt_hm_path_to_wd == null) return error.PATH_TO_WATCHDOG_HASHMAP_NOT_INIT;
     if (p_wd.platform_vars.opt_hm_wd_to_path == null) return error.WATCHDOG_TO_PATH_HASHMAP_NOT_INIT;
 
-    // reading from file descriptor the responds w/ events
+    // buf to hold read events (read will return all events since last call)
     var buf: [INOTIFY_READ_BUF_LEN]u8 = undefined; // u8 == byte --> matches with @sizeOf()
-    const len_read: usize = try posix.read(p_wd.platform_vars.fd, buf[0..INOTIFY_READ_BUF_LEN]);
+
+    // posix.read WILL block until data is available
+    const len_read: usize = try posix.read(p_wd.platform_vars.fd, buf[0..INOTIFY_READ_BUF_LEN]); 
     if (len_read == 0) return; // nothing read
     
     // iterating over all values in read buffer --> checking maps

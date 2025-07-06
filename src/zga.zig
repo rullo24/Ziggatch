@@ -42,15 +42,40 @@ pub const ZGA_WATCHDOG: type = struct {
     event_queue: ?tsq.createTSQ(ZGA_EVENT) = null,
     error_queue: ?tsq.createTSQ(anyerror) = null,
 
+    // defining mutex vars for thread-safe execution
+    has_been_init_mutex: std.Thread.Mutex = std.Thread.Mutex{},
+    alloc_mutex: std.Thread.Mutex = std.Thread.Mutex{},
+    platform_vars_mutex: std.Thread.Mutex = std.Thread.Mutex{},
+    event_queue_mutex: std.Thread.Mutex = std.Thread.Mutex{},
+    error_queue_mutex: std.Thread.Mutex = std.Thread.Mutex{},
+
     pub fn init(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
+        self.has_been_init_mutex.lock();
         if (self.has_been_init == true) return error.ZGA_WATCHDOG_OBJ_ALREADY_INITIALISED;
+
+        self.alloc_mutex.lock();
         self.alloc = alloc; // for freeing memory later
+
         if (self.alloc) |l_alloc| {
+            self.event_queue_mutex.lock();
             self.event_queue = try tsq.createTSQ(ZGA_EVENT).init(l_alloc, SIZE_EVENT_QUEUE);
+            errdefer self.event_queue.?.deinit() catch {};
+            self.event_queue_mutex.unlock();
+
+            self.error_queue_mutex.lock();
             self.error_queue = try tsq.createTSQ(anyerror).init(l_alloc, SIZE_ERROR_QUEUE);
+            errdefer self.error_queue.?.deinit() catch {};
+            self.error_queue_mutex.unlock();
         } else return error.INVALID_ALLOCATOR;
-        try zga_backend.watchdogInit(self); // initialise O/S-specific vars and buffers
+        self.alloc_mutex.unlock();
+        
+        // initialise O/S-specific vars and buffers
+        if (std.meta.hasFn(zga_backend, "watchdogInit")) { // check if func available on target o/s
+            try zga_backend.watchdogInit(self); 
+        } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
+        
         self.has_been_init = true; // flag so that other methods cannot be run before initialisation
+        self.has_been_init_mutex.unlock();
     }
 
     /// adding a directory to the obj watchlist
@@ -75,15 +100,15 @@ pub const ZGA_WATCHDOG: type = struct {
     }
 
     pub fn popEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
-        if (self.event_queue) |event_queue| {
-            const pop_event: ZGA_EVENT = try event_queue.pop();
+        if (self.event_queue) |*p_event_queue| {
+            const pop_event: ZGA_EVENT = try p_event_queue.pop();
             return pop_event;
         } else return error.EVENT_QUEUE_NULL;
     }
 
     pub fn popError(self: *ZGA_WATCHDOG) !anyerror {
-        if (self.error_queue) |err_queue| {
-            const pop_err: ZGA_EVENT = try err_queue.pop();
+        if (self.error_queue) |*p_err_queue| {
+            const pop_err: ZGA_EVENT = try p_err_queue.pop();
             return pop_err;
         } else return error.ERROR_QUEUE_NULL;
     }
@@ -124,7 +149,7 @@ pub const ZGA_WATCHDOG: type = struct {
         if (self.event_queue) |*p_event_queue| {
             // cleaning queue --> freeing all allocated heap memory
             while (try p_event_queue.getSize() > 0) { 
-                const curr_event: ZGA_EVENT = try p_event_queue.pop();
+                const curr_event: ZGA_EVENT = p_event_queue.pop() catch break;
                 if (self.alloc) |l_alloc| {
                     l_alloc.free(curr_event.name);
                 } else return error.INVALID_ALLOCATOR;

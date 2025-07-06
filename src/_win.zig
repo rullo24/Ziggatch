@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const win32 = std.os.windows;
+const zga = @import("zga.zig");
 
 ///////////////////////////////
 // MAGIC NUMBER DECLARATIONS //
@@ -79,6 +80,28 @@ extern "kernel32" fn ReadDirectoryChangesW(
 // PUBLIC FUNCTIONS //
 //////////////////////
 
+pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
+    _ = p_wd;
+}
+
+pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
+    _ = p_wd;
+    _ = path;
+    _ = flags;
+}
+
+pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
+    _ = p_wd;
+    _ = path;
+}
+
+pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG) !void {
+    _ = p_wd;
+}
+
+pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) !void {
+    _ = p_wd;
+}
 
 ///////////////////////
 // PRIVATE FUNCTIONS //
