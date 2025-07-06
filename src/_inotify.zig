@@ -280,11 +280,8 @@ fn ZGAToInotifyFlags(zga_mask: u32) u32 {
 
 test "watchdogInit: Successfully initializes watchdog when all preconditions are met" {
     // 1. Setup a fresh ZGA_WATCHDOG with alloc and all preconditions met
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const alloc: std.mem.Allocator = gpa.allocator();
-    defer _ = gpa.deinit();
     var test_wd: zga.ZGA_WATCHDOG = .{};
-    test_wd.alloc = alloc;
+    test_wd.alloc = std.heap.page_allocator;
     test_wd.has_been_init = false;
     test_wd.platform_vars.fd = -1;
     test_wd.platform_vars.opt_hm_path_to_wd = null;
@@ -294,9 +291,15 @@ test "watchdogInit: Successfully initializes watchdog when all preconditions are
     try watchdogInit(&test_wd);
 
     // 3. assert fd is set and hashmaps initialized
-    std.testing.expect(test_wd.platform_vars.fd >= 0);
-    std.testing.expect(test_wd.platform_vars.opt_hm_path_to_wd != null);
-    std.testing.expect(test_wd.platform_vars.opt_hm_wd_to_path != null);
+    try std.testing.expect(test_wd.platform_vars.fd >= 0);
+    try std.testing.expect(test_wd.platform_vars.opt_hm_path_to_wd != null);
+    try std.testing.expect(test_wd.platform_vars.opt_hm_wd_to_path != null);
+
+    // THIS SHOULD BE FORCING A FAIL BUT IT IS NOT USING "zig build tests"
+    try std.testing.expect(test_wd.platform_vars.opt_hm_wd_to_path == null);
+
+
+
 }
 
 test "watchdogInit: Fails if watchdog already initialized (has_been_init == true)" {

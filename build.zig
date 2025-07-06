@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) !void {
 
     const test_build_step = b.step("test", "Run all tests.");
     const tests_build_step = b.step("tests", "Run all tests.");
+    const testing_build_step = b.step("testing", "Run all tests.");
 
     // open the "src" directory --> for checking available files
     var src_dir: std.fs.Dir = try std.fs.cwd().openDir(b.pathFromRoot("src"), .{
@@ -56,12 +57,15 @@ pub fn build(b: *std.Build) !void {
                 var test_step = b.addTest(.{
                     .name = test_name,
                     .root_source_file = src_lazypath,
+                    .target = def_target,
+                    .optimize = def_optimise,
                 });
                 test_step.root_module.addImport("ZGA", ZGA_module);
                 test_step.root_module.addImport("TSQ", TSQ_module);
 
                 test_build_step.dependOn(&test_step.step); // adding test to fleet of tests
                 tests_build_step.dependOn(&test_step.step); // adding test to fleet of tests
+                testing_build_step.dependOn(&test_step.step); // adding test to fleet of tests
             }
         }
     }
