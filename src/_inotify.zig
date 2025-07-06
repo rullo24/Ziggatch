@@ -93,9 +93,7 @@ pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, zga_flags: u32) !v
     if (p_wd.platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| try p_hm_wd_to_path.put(watch_desc, path);
 }
 
-pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, zga_flags: u32) !void {
-    _ = zga_flags; // unused in Linux version
-
+pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
     if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
     if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
     if (p_wd.platform_vars.opt_hm_path_to_wd == null) return error.PATH_TO_WATCHDOG_HASHMAP_NOT_INIT;
@@ -116,7 +114,9 @@ pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, zga_flags: u32)
     } else return error.HM_DOES_NOT_CONTAIN_PATH_AS_KEY;
 }
 
-pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG) !void {
+pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
+    _ = zga_flags; // unused in Linux version
+
     if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
     if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
     if (p_wd.platform_vars.opt_hm_path_to_wd == null) return error.PATH_TO_WATCHDOG_HASHMAP_NOT_INIT;

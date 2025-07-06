@@ -131,22 +131,28 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
             if (read_changes_result == win32.FALSE) return error.FAILED_ReadDirectoryChangesW_CALL;
 
             var offset: usize = 0; // init offset to iterate through the buffer of dir change events
-            while (offset < bytes_returned) {
-                
+            while (offset < bytes_returned) { // iterate over ea notify obj that is sent to buf of ReadDirectoryChangesW
                 // calc filename ptr for collecting the file that changes act on
                 const info: *win32.FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(&buf[offset]));
                 const info_filename_start_loc_p_int: usize = @intFromPtr(&info.FileNameLength) + @sizeOf(win32.DWORD);
                 const p_info_filename: [*]const u16 = @ptrFromInt(info_filename_start_loc_p_int);
                 const name_len_wchar: usize = info.FileNameLength / 2; // in WCHARs
 
+                // creating ZGA_EVENT obj from relevant vars
+                var curr_event: zga.ZGA_EVENT = .{ .zga_flags = zga_flags, };
+
                 // conv UTF-16 filename slice to UTF-8 in a fixed buffer.
                 const name_slice: []const u16 = p_info_filename[0..name_len_wchar];
-                var utf8_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const bytes_written: usize = try std.unicode.utf16LeToUtf8(&utf8_buf, name_slice);
-                const utf8_name_slice: []const u8 = utf8_buf[0..bytes_written];
+                const bytes_written: usize = try std.unicode.utf16LeToUtf8(&curr_event.name_buf, name_slice); // writing to obj for queue
+                curr_event.name = curr_event.name_buf[0..bytes_written]; // creating slice from num of bytes written to name buf
 
-                std.debug.print("Action: {any} | File: {s}\n", .{ info.Action, utf8_name_slice });
+                // pushing current event to the global queue
+                if (p_wd.event_queue) |*p_event_queue| {
+                    try p_event_queue.push(curr_event);
 
+                } else return error.EVENT_QUEUE_NOT_INIT;
+
+                // move to next event entry, or break if this is the last one
                 if (info.NextEntryOffset == 0) break;
                 offset += @intCast(info.NextEntryOffset);
             }

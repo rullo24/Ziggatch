@@ -29,7 +29,7 @@ pub const ZGA_MOVED: comptime_int           = 1 << 5;
 
 // represents a change to filesystem
 pub const ZGA_EVENT = struct {
-    name_buf: [std.fs.MAX_NAME_BYTES]u8 = undefined, // holds the path
+    name_buf: [std.fs.max_path_bytes]u8 = undefined, // holds the path
     name: []const u8 = "",
     zga_flags: u32 = 0x0,
 };
