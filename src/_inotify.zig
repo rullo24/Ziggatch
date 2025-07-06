@@ -271,3 +271,83 @@ fn ZGAToInotifyFlags(zga_mask: u32) u32 {
 
     return inotify_mask;
 }
+
+///////////////////////////
+// PUBLIC FUNCTION TESTS //
+///////////////////////////
+
+// watchdogInit //
+
+test "watchdogInit: Successfully initializes watchdog when all preconditions are met" {
+    // 1. Setup a fresh ZGA_WATCHDOG with alloc and all preconditions met
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const alloc: std.mem.Allocator = gpa.allocator();
+    defer _ = gpa.deinit();
+    var test_wd: zga.ZGA_WATCHDOG = .{};
+    test_wd.alloc = alloc;
+    test_wd.has_been_init = false;
+    test_wd.platform_vars.fd = -1;
+    test_wd.platform_vars.opt_hm_path_to_wd = null;
+    test_wd.platform_vars.opt_hm_wd_to_path = null;
+ 
+    // 2. Call watchdogInit --> should succeed w/o errors
+    try watchdogInit(&test_wd);
+
+    // 3. assert fd is set and hashmaps initialized
+    std.testing.expect(test_wd.platform_vars.fd >= 0);
+    std.testing.expect(test_wd.platform_vars.opt_hm_path_to_wd != null);
+    std.testing.expect(test_wd.platform_vars.opt_hm_wd_to_path != null);
+}
+
+test "watchdogInit: Fails if watchdog already initialized (has_been_init == true)" {
+    // Setup watchdog with has_been_init = true
+    // Call watchdogInit
+    // Assert error.WATCHDOG_ALREADY_INIT returned
+}
+
+test "watchdogInit: Fails if file descriptor already set (platform_vars.fd >= 0)" {
+    // Setup watchdog with platform_vars.fd >= 0
+    // Call watchdogInit
+    // Assert error.WATCHDOG_FILE_DESC_ALREADY_SET returned
+}
+
+test "watchdogInit: Fails if path-to-watchdog hashmap already initialized (opt_hm_path_to_wd != null)" {
+    // Setup watchdog with opt_hm_path_to_wd != null
+    // Call watchdogInit
+    // Assert error.PATH_TO_WATCHDOG_HASHMAP_ALREADY_INIT returned
+}
+
+test "watchdogInit: Fails if watchdog-to-path hashmap already initialized (opt_hm_wd_to_path != null)" {
+    // Setup watchdog with opt_hm_wd_to_path != null
+    // Call watchdogInit
+    // Assert error.WATCHDOG_TO_PATH_HASHMAP_ALREADY_INIT returned
+}
+
+test "watchdogInit: Fails if allocator is null" {
+    // Setup watchdog with alloc = null
+    // Call watchdogInit
+    // Assert appropriate error returned or behavior (depending on code)
+}
+
+test "watchdogInit: Cleans up file descriptor if error occurs during hashmap initialization" {
+    // This might require mocking or instrumentation
+    // Simulate an error during hashmap init or adding watchers
+    // Ensure fd is closed on error
+}
+
+test "watchdogInit: Validates that file descriptor is valid (> 0) after initialization" {
+    // Setup a fresh watchdog and call watchdogInit
+    // Assert that platform_vars.fd > 0 after init
+}
+
+// watchdogAdd //
+
+
+// watchdogRemove //
+
+
+// watchdogRead //
+
+
+// watchdogDeinit//
+

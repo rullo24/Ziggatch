@@ -38,7 +38,7 @@ pub fn main() !void {
         std.debug.print("SLEPT\n", .{});
 
         if (try wd.event_queue.?.getSize() > 0) {
-            const event: zga.ZGA_EVENT = wd.popEvent() catch continue; 
+            const event: zga.ZGA_EVENT = wd.popSingleEvent() catch continue; 
             std.debug.print("popped event\n", .{});
             std.debug.print("{s}\n", .{event.name});
         }
