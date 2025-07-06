@@ -13,11 +13,12 @@ pub fn main() !void {
     defer wd.close() catch {};
 
     const example_name: []const u8 = "/home/kali/Desktop/Ziggatch/zig-out/bin";
-    try wd.add(example_name, 0x00000100);
+    const example_flags: comptime_int = zga.ZGA_ACCESSED | zga.ZGA_MODIFIED;
+    try wd.add(example_name, example_flags);
     try wd.remove(example_name);
-    try wd.add(example_name, 0x00000100);
+    try wd.add(example_name, example_flags);
     try wd.remove(example_name);
-    try wd.add(example_name, 0x00000100);
+    try wd.add(example_name, example_flags);
 
 
 
@@ -30,7 +31,7 @@ pub fn main() !void {
     const one_ms_to_ns: comptime_int = 1 * std.time.ns_per_ms;
     while (true) {
         std.debug.print("IN READ LOOP\n", .{});
-        try wd.read();
+        try wd.read(example_flags);
         std.debug.print("OUT READ LOOP\n", .{});
 
         std.time.sleep(one_ms_to_ns);

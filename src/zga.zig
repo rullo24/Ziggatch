@@ -103,7 +103,7 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
-    pub fn read(self: *ZGA_WATCHDOG) !void {
+    pub fn read(self: *ZGA_WATCHDOG, flags: u32) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
         self.platform_vars_mutex.lock();
@@ -114,7 +114,7 @@ pub const ZGA_WATCHDOG: type = struct {
         defer self.error_queue_mutex.unlock();
 
         if (std.meta.hasFn(zga_backend, "watchdogRead") == false) return error.watchdogRead_FUNC_NOT_AVAIL_ON_OS; // check if func available on target o/s
-            zga_backend.watchdogRead(self) catch |read_err| {
+            zga_backend.watchdogRead(self, flags) catch |read_err| {
                 if (read_err != error.WouldBlock) return read_err; // error.WouldBlock returned when no data is available (only return other errors)
             };
     }

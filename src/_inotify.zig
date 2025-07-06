@@ -72,16 +72,19 @@ pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
     }
 }
 
-pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
+pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, zga_flags: u32) !void {
     if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
     if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
     if (p_wd.platform_vars.opt_hm_path_to_wd == null) return error.PATH_TO_WATCHDOG_HASHMAP_NOT_INIT;
     if (p_wd.platform_vars.opt_hm_wd_to_path == null) return error.WATCHDOG_TO_PATH_HASHMAP_NOT_INIT;
 
-    if (flags == 0x0) return error.INVALID_FLAGS_PARSED;
-    if (p_wd.platform_vars.opt_hm_path_to_wd.?.contains(path) == true) return error.WATCHDOG_ALREADY_ADDED_FOR_PATH; // will err if there is already a path in the hashmap (already set)
+    // will err if there is already a path in the hashmap (already set)
+    if (p_wd.platform_vars.opt_hm_path_to_wd.?.contains(path) == true) return error.WATCHDOG_ALREADY_ADDED_FOR_PATH; 
 
-    const watch_desc: i32 = try posix.inotify_add_watch(p_wd.platform_vars.fd, path, flags);
+    // adding new watcher w/ flags (parsed)
+    const inotify_flags: u32 = ZGAToInotifyFlags(zga_flags);
+    if (inotify_flags == 0x0) return error.NO_FLAGS_PARSED;
+    const watch_desc: i32 = try posix.inotify_add_watch(p_wd.platform_vars.fd, path, inotify_flags);
     errdefer posix.inotify_rm_watch(p_wd.platform_vars.fd, watch_desc); // remove watchdog if can't add it to hashmap
     if (watch_desc < 0) return error.FAILED_TO_ADD_WATCHDOG_FILE;
 
@@ -90,7 +93,9 @@ pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, flags: u32) !void 
     if (p_wd.platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| try p_hm_wd_to_path.put(watch_desc, path);
 }
 
-pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
+pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, zga_flags: u32) !void {
+    _ = zga_flags; // unused in Linux version
+
     if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
     if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
     if (p_wd.platform_vars.opt_hm_path_to_wd == null) return error.PATH_TO_WATCHDOG_HASHMAP_NOT_INIT;
@@ -216,4 +221,20 @@ fn inotifyToZGAFlags(inotify_mask: u32) u32 {
     if ((inotify_mask & IN_MOVE_SELF) != 0) zga_mask |= zga.ZGA_MOVED;
 
     return zga_mask;
+}
+
+fn ZGAToInotifyFlags(zga_mask: u32) u32 {
+    var inotify_mask: u32 = 0x0;
+
+    if ((zga_mask & zga.ZGA_ACCESSED) != 0) inotify_mask |= IN_ACCESS;
+    if ((zga_mask & zga.ZGA_MODIFIED) != 0) inotify_mask |= IN_MODIFY;
+    if ((zga_mask & zga.ZGA_ATTRIB) != 0) inotify_mask |= IN_ATTRIB;
+    if ((zga_mask & zga.ZGA_CREATE) != 0) inotify_mask |= IN_CREATE;
+    if ((zga_mask & zga.ZGA_DELETE) != 0) inotify_mask |= IN_DELETE;
+    if ((zga_mask & zga.ZGA_DELETE) != 0) inotify_mask |= IN_DELETE_SELF;
+    if ((zga_mask & zga.ZGA_MOVED) != 0) inotify_mask |= IN_MOVED_FROM;
+    if ((zga_mask & zga.ZGA_MOVED) != 0) inotify_mask |= IN_MOVED_TO;
+    if ((zga_mask & zga.ZGA_MOVED) != 0) inotify_mask |= IN_MOVE_SELF;
+
+    return inotify_mask;
 }
