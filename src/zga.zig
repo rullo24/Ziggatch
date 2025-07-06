@@ -13,8 +13,8 @@ const zga_backend: type = selectBackend();
 // MAGIC NUMBER DECLARATIONS //
 ///////////////////////////////
 
-const SIZE_EVENT_QUEUE: usize           = 1024;
-const SIZE_ERROR_QUEUE: usize           = 1024;
+pub const SIZE_EVENT_QUEUE: usize           = 1024;
+pub const SIZE_ERROR_QUEUE: usize           = 1024;
 
 pub const ZGA_ACCESSED: comptime_int        = 1 << 0;
 pub const ZGA_MODIFIED: comptime_int        = 1 << 1;
@@ -51,23 +51,25 @@ pub const ZGA_WATCHDOG: type = struct {
 
     pub fn init(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
         self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
         if (self.has_been_init == true) return error.ZGA_WATCHDOG_OBJ_ALREADY_INITIALISED;
 
         self.alloc_mutex.lock();
+        defer self.alloc_mutex.unlock();
         self.alloc = alloc; // for freeing memory later
 
         if (self.alloc) |l_alloc| {
             self.event_queue_mutex.lock();
+            defer self.event_queue_mutex.unlock();
+
             self.event_queue = try tsq.createTSQ(ZGA_EVENT).init(l_alloc, SIZE_EVENT_QUEUE);
             errdefer self.event_queue.?.deinit() catch {};
-            self.event_queue_mutex.unlock();
 
             self.error_queue_mutex.lock();
+            defer self.error_queue_mutex.unlock();
             self.error_queue = try tsq.createTSQ(anyerror).init(l_alloc, SIZE_ERROR_QUEUE);
             errdefer self.error_queue.?.deinit() catch {};
-            self.error_queue_mutex.unlock();
         } else return error.INVALID_ALLOCATOR;
-        self.alloc_mutex.unlock();
         
         // initialise O/S-specific vars and buffers
         if (std.meta.hasFn(zga_backend, "watchdogInit")) { // check if func available on target o/s
@@ -75,11 +77,15 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
         
         self.has_been_init = true; // flag so that other methods cannot be run before initialisation
-        self.has_been_init_mutex.unlock();
     }
 
     /// adding a directory to the obj watchlist
     pub fn add(self: *ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        self.platform_vars_mutex.lock();
+        defer self.platform_vars_mutex.unlock();
+
         if (std.meta.hasFn(zga_backend, "watchdogAdd")) { // check if func available on target o/s
             try zga_backend.watchdogAdd(self, path, flags);
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
@@ -87,12 +93,26 @@ pub const ZGA_WATCHDOG: type = struct {
 
     /// removing a directory from obj watchlist
     pub fn remove(self: *ZGA_WATCHDOG, path: []const u8) !void {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        self.platform_vars_mutex.lock();
+        defer self.platform_vars_mutex.unlock();
+
         if (std.meta.hasFn(zga_backend, "watchdogRemove")) { // check if func available on target o/s
             try zga_backend.watchdogRemove(self, path);
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
     pub fn read(self: *ZGA_WATCHDOG) !void {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        self.platform_vars_mutex.lock();
+        defer self.platform_vars_mutex.unlock();
+        self.event_queue_mutex.lock();
+        defer self.event_queue_mutex.unlock();
+        self.error_queue_mutex.lock();
+        defer self.error_queue_mutex.unlock();
+
         if (std.meta.hasFn(zga_backend, "watchdogRead") == false) return error.watchdogRead_FUNC_NOT_AVAIL_ON_OS; // check if func available on target o/s
             zga_backend.watchdogRead(self) catch |read_err| {
                 if (read_err != error.WouldBlock) return read_err; // error.WouldBlock returned when no data is available (only return other errors)
@@ -100,6 +120,9 @@ pub const ZGA_WATCHDOG: type = struct {
     }
 
     pub fn popEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
+        self.event_queue_mutex.lock();
+        defer self.event_queue_mutex.unlock();
+
         if (self.event_queue) |*p_event_queue| {
             const pop_event: ZGA_EVENT = try p_event_queue.pop();
             return pop_event;
@@ -107,6 +130,9 @@ pub const ZGA_WATCHDOG: type = struct {
     }
 
     pub fn popError(self: *ZGA_WATCHDOG) !anyerror {
+        self.error_queue_mutex.lock();
+        defer self.error_queue_mutex.unlock();
+
         if (self.error_queue) |*p_err_queue| {
             const pop_err: ZGA_EVENT = try p_err_queue.pop();
             return pop_err;
@@ -114,6 +140,13 @@ pub const ZGA_WATCHDOG: type = struct {
     }
 
     pub fn watchlist(self: *ZGA_WATCHDOG) ![][]const u8 {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        self.platform_vars_mutex.lock();
+        defer self.platform_vars_mutex.unlock();
+        self.alloc_mutex.lock();
+        defer self.alloc_mutex.unlock();
+
         if (self.has_been_init == false) return error.WD_HAS_NOT_BEEN_INIT; // return an error for a non-initialised array
         if (self.alloc) |l_alloc| {
             var wd_watchlist = std.ArrayList([]const u8).init(l_alloc);
@@ -141,6 +174,17 @@ pub const ZGA_WATCHDOG: type = struct {
     }
 
     pub fn close(self: *ZGA_WATCHDOG) !void {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        self.platform_vars_mutex.lock();
+        defer self.platform_vars_mutex.unlock();
+        self.alloc_mutex.lock();
+        defer self.alloc_mutex.unlock();
+        self.event_queue_mutex.lock();
+        defer self.event_queue_mutex.unlock();
+        self.error_queue_mutex.lock();
+        defer self.error_queue_mutex.unlock();
+
         if (self.has_been_init == false) return error.ZGA_WATCHDOG_OBJ_NOT_INITIALISED;
         if (std.meta.hasFn(zga_backend, "watchdogDeinit")) { // check if func available on target o/s
             try zga_backend.watchdogDeinit(self);

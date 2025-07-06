@@ -129,7 +129,7 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG) !void {
     while (i < len_read) { // iterating over all read inotify responses
         const p_curr_event: *linux.inotify_event = @alignCast(@ptrCast(buf[i..].ptr)); // cast bytes to aligned inotify_event ptr
         if ((p_curr_event.mask & IN_Q_OVERFLOW) != 0) { // occurs if the provided buffer is too small for the num of events or removed inotify event comes through
-            if (p_wd.error_queue) |err_queue| try err_queue.push(error.EVENT_READ_OVERFLOWED_SOME_EVENTS_LOST);
+            if (p_wd.error_queue) |*p_err_queue| try p_err_queue.push(error.EVENT_READ_OVERFLOWED_SOME_EVENTS_LOST);
         } else if ((p_curr_event.mask & IN_IGNORED) != 0) {
             // pass --> do nothing for ignored events
         } else {
@@ -141,7 +141,7 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG) !void {
                 const scope_temp_filename: []const u8 = std.mem.span(filename_c.ptr); // from null-term to []const u8 --> required alloc'd mem?
 
                 // copying filename to event obj
-                const max_filename_len: usize = std.math.min(scope_temp_filename.len, zga_curr_event.name_buf.len);
+                const max_filename_len: usize = @min(scope_temp_filename.len, zga_curr_event.name_buf.len);
                 std.mem.copyForwards(u8, zga_curr_event.name_buf[0..max_filename_len], scope_temp_filename[0..max_filename_len]);
                 zga_curr_event.name = zga_curr_event.name_buf[0..max_filename_len];
                 zga_curr_event.zga_flags = inotifyToZGAFlags(p_curr_event.mask);
@@ -151,16 +151,16 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG) !void {
                     const scope_temp_filename: []const u8 = p_hm_wd_to_path.get(p_curr_event.wd) orelse return error.COULD_NOT_FIND_EVENT_WD_IN_HM; // doesn't require allocated mem
                     
                     // copying filename to event obj
-                    const max_filename_len: usize = std.math.min(scope_temp_filename.len, zga_curr_event.name_buf.len);
+                    const max_filename_len: usize = @min(scope_temp_filename.len, zga_curr_event.name_buf.len);
                     std.mem.copyForwards(u8, zga_curr_event.name_buf[0..max_filename_len], scope_temp_filename[0..max_filename_len]);
                     zga_curr_event.name = zga_curr_event.name_buf[0..max_filename_len];
                     zga_curr_event.zga_flags = inotifyToZGAFlags(p_curr_event.mask);
-                }
+                } else return error.HM_WD_TO_PATH_NOT_INIT;
             }
 
             // adding the event to the global queue --> user to interpret this data
-            if (p_wd.event_queue) |event_queue| {
-                try event_queue.push(zga_curr_event); 
+            if (p_wd.event_queue) |*p_event_queue| {
+                try p_event_queue.push(zga_curr_event); 
             }
         }
 

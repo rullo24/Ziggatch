@@ -31,9 +31,16 @@ pub fn main() !void {
     while (true) {
         std.debug.print("IN READ LOOP\n", .{});
         try wd.read();
+        std.debug.print("OUT READ LOOP\n", .{});
+
         std.time.sleep(one_ms_to_ns);
-        const event: zga.ZGA_EVENT = wd.popEvent() catch continue; 
-        std.debug.print("{s}\n", .{event.name});
+        std.debug.print("SLEPT\n", .{});
+
+        if (try wd.event_queue.?.getSize() > 0) {
+            const event: zga.ZGA_EVENT = wd.popEvent() catch continue; 
+            std.debug.print("popped event\n", .{});
+            std.debug.print("{s}\n", .{event.name});
+        }
     }
 
     const ex_watchlist = try wd.watchlist();

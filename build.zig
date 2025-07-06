@@ -28,6 +28,11 @@ pub fn build(b: *std.Build) !void {
     });
     ZGA_module.addImport("TSQ", TSQ_module);
     
+    
+
+
+
+
     // building example executables
     
     
@@ -35,7 +40,6 @@ pub fn build(b: *std.Build) !void {
 
 
     // TO BE CHANGED AFTER DONE DEBUGGING (CURRENTLY should_build_examples set to opposite bool for easy building exes)
-
 
 
 
@@ -63,11 +67,27 @@ pub fn build(b: *std.Build) !void {
                 const os_str: []const u8 = @tagName(def_target.result.os.tag);
                 const exe_name: []const u8 = b.fmt("{s}_{s}_{s}", .{example_file_basename, arch_str, os_str});
 
+
+
+                
+
+
+
+                // for windows dev on linux
+
+                const forced_target = b.resolveTargetQuery(.{
+                    .os_tag = .windows,
+                    .cpu_arch = def_target.result.cpu.arch,
+                });
+
+
+
+
                 // creating executables for each example
                 const curr_exe = b.addExecutable(.{ 
                     .name = exe_name,
                     .root_source_file = b.path(path),
-                    .target = def_target,
+                    .target = forced_target,
                     .optimize = def_optimise,
                 });
 
