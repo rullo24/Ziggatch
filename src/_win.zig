@@ -38,6 +38,7 @@ const DEFAULT_WIN32_FLAGS: win32.FileNotifyChangeFilter = .{};
 /// inits the internal Windows-specific data structures used by the watchdog.
 /// must be called before any other Windows-specific watchdog operations.
 ///
+/// PARAMS:
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
     if (p_wd.has_been_init == true) return error.WATCHDOG_ALREADY_INIT;
@@ -59,6 +60,7 @@ pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
 
 /// adds a directory path to the watchlist
 ///
+/// PARAMS:
 /// - `path`: UTF-8 path to the directory to watch.
 /// - `flags`: Bitmask of ZGA flags indicating which changes to monitor.
 pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
@@ -91,6 +93,7 @@ pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, flags: u32) !void 
 
 /// Removes a previously added path from the watchlist.
 ///
+/// PARAMS:
 /// - `path`: UTF-8 path to remove from watching.
 pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
     // removing from handle --> path hashmap
@@ -115,6 +118,7 @@ pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
 
 /// reads file change events from all watched directories and pushes them to the event queue.
 ///
+/// PARAMS:
 /// - `zga_flags`: Bitmask of ZGA event flags to filter which changes are captured.
 pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
     // buf to hold handle event info
@@ -178,6 +182,7 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
 /// cleans up all Windows-specific watchdog resources and internal structures.
 /// after this call, the watchdog must be re-initialised before use.
 ///
+/// PARAMS:
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) !void {
     if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
@@ -211,6 +216,7 @@ pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) !void {
 
 /// converts a Windows file change filter to a cross-platform ZGA event flag bitmask.
 ///
+/// PARAMS:
 /// - `win32_flags`: A Windows file change filter structure.
 fn win32ToZGAFlags(win32_flags: win32.FileNotifyChangeFilter) u32 {
     var zga_mask: u32 = 0x0;
@@ -228,6 +234,7 @@ fn win32ToZGAFlags(win32_flags: win32.FileNotifyChangeFilter) u32 {
 
 /// converts a ZGA event flag bitmask into a Windows-compatible file change filter.
 ///
+/// PARAMS:
 /// - `zga_mask`: A bitmask composed of ZGA event flags.
 fn zgaToWin32Flags(zga_mask: u32) win32.FileNotifyChangeFilter {
     var win32_flags: win32.FileNotifyChangeFilter = .{};

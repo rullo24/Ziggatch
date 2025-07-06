@@ -51,6 +51,7 @@ pub const INOTIFY_VARS = struct {
 /// inits the inotify-based watchdog resources and internal structures.
 /// Must be called before using other watchdog functions.
 ///
+/// PARAMS:
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
     if (p_wd.has_been_init == true) return error.WATCHDOG_ALREADY_INIT;
@@ -78,6 +79,7 @@ pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
 
 /// adds a directory or file path to the watchlist with specified event flags.
 ///
+/// PARAMS:
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 /// - `path`: UTF-8 path to the directory or file to watch.
 /// - `zga_flags`: Bitmask of ZGA event flags indicating which changes to monitor.
@@ -104,6 +106,7 @@ pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, zga_flags: u32) !v
 
 /// removes a watched path from the watchlist.
 ///
+/// PARAMS:
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 /// - `path`: UTF-8 path to remove from watching.
 pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
@@ -129,6 +132,7 @@ pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
 
 /// reads file change events and pushes them to the event queue.
 ///
+/// PARAMS:
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 /// - `zga_flags`: Bitmask of ZGA event flags to filter which changes are captured (unused on Linux).
 pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
@@ -193,6 +197,7 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
 
 /// cleans up all inotify-related watchdog resources.
 ///
+/// PARAMS:
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) !void {
     if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
@@ -229,6 +234,7 @@ pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) !void {
 
 /// converts an inotify mask to a cross-platform ZGA event flag bitmask.
 ///
+/// PARAMS:
 /// - `inotify_mask`: The inotify event mask.
 fn inotifyToZGAFlags(inotify_mask: u32) u32 {
     var zga_mask: u32 = 0x0;
@@ -248,6 +254,7 @@ fn inotifyToZGAFlags(inotify_mask: u32) u32 {
 
 /// converts a ZGA event flag bitmask to an inotify event mask.
 ///
+/// PARAMS:
 /// - `zga_mask`: The ZGA event flag bitmask.
 fn ZGAToInotifyFlags(zga_mask: u32) u32 {
     var inotify_mask: u32 = 0x0;

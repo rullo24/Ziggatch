@@ -49,6 +49,12 @@ pub const ZGA_WATCHDOG: type = struct {
     event_queue_mutex: std.Thread.Mutex = std.Thread.Mutex{},
     error_queue_mutex: std.Thread.Mutex = std.Thread.Mutex{},
 
+    /// inits the ZGA_WATCHDOG object and allocates resources.
+    /// must be called before using other watchdog functions.
+    ///
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
+    /// - `alloc`: Allocator used for internal allocations.
     pub fn init(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
@@ -79,7 +85,12 @@ pub const ZGA_WATCHDOG: type = struct {
         self.has_been_init = true; // flag so that other methods cannot be run before initialisation
     }
 
-    /// adding a directory to the obj watchlist
+    /// adds a path (file or directory) to the watchlist with specified event flags.
+    ///
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
+    /// - `path`: UTF-8 path to watch.
+    /// - `flags`: Bitmask of event flags indicating which changes to monitor.
     pub fn add(self: *ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
@@ -91,7 +102,11 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
-    /// removing a directory from obj watchlist
+    /// removes a path from the watchlist.
+    ///
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
+    /// - `path`: UTF-8 path to remove from watching.
     pub fn remove(self: *ZGA_WATCHDOG, path: []const u8) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
@@ -103,6 +118,11 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
+    /// reads file change events and pushes them to the event queue.
+    ///
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
+    /// - `flags`: Bitmask of event flags to filter which changes are captured (may be unused depending on backend).
     pub fn read(self: *ZGA_WATCHDOG, flags: u32) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
@@ -119,6 +139,10 @@ pub const ZGA_WATCHDOG: type = struct {
             };
     }
 
+    /// pops a single event from the event queue.
+    /// if the queue is empty, this function blocks until a pop value is available
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
     pub fn popSingleEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
         self.event_queue_mutex.lock();
         defer self.event_queue_mutex.unlock();
@@ -129,6 +153,10 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.EVENT_QUEUE_NULL;
     }
 
+    /// pops a single event from the error queue.
+    /// if the queue is empty, this function blocks until a pop value is available
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
     pub fn popSingleError(self: *ZGA_WATCHDOG) !anyerror {
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
@@ -139,6 +167,12 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.ERROR_QUEUE_NULL;
     }
 
+    /// returns an allocated list (as a slice) of all currently watched paths.
+    /// slice of paths must be freed by the caller.
+    ///
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
+    /// - `alloc`: Allocator used to allocate the returned list.
     pub fn getWatchlistAlloc(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) ![][]const u8 {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
@@ -174,6 +208,10 @@ pub const ZGA_WATCHDOG: type = struct {
         return wd_watchlist.toOwnedSlice(); // to be free'd externally
     }
 
+    /// cleans up all watchdog resources, freeing internal allocations.
+    /// after this call, the object must be re-initialised before reuse.
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
     pub fn close(self: *ZGA_WATCHDOG) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
@@ -223,7 +261,9 @@ pub const ZGA_WATCHDOG: type = struct {
 // PRIVATE FUNCTION DECLARATIONS //
 ///////////////////////////////////
 
-// selects backend (methods to use) based on target architecture and O/S
+/// selects the OS-specific backend implementation at compile-time.
+/// PARAMS:
+/// N/A
 fn selectBackend() type {
     switch(builtin.target.os.tag) {
         .windows => return _win,
@@ -232,7 +272,9 @@ fn selectBackend() type {
     }
 }
 
-// creates struct to hold OS-specific variables at comptime
+/// selects the OS-specific platform variables struct type at compile-time.
+/// PARAMS:
+/// N/A
 fn selectPlatformVars() type {
     switch(builtin.target.os.tag) {
         .windows => return _win.WIN32_VARS,
