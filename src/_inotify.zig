@@ -294,12 +294,6 @@ test "watchdogInit: Successfully initializes watchdog when all preconditions are
     try std.testing.expect(test_wd.platform_vars.fd >= 0);
     try std.testing.expect(test_wd.platform_vars.opt_hm_path_to_wd != null);
     try std.testing.expect(test_wd.platform_vars.opt_hm_wd_to_path != null);
-
-    // THIS SHOULD BE FORCING A FAIL BUT IT IS NOT USING "zig build tests"
-    try std.testing.expect(test_wd.platform_vars.opt_hm_wd_to_path == null);
-
-
-
 }
 
 test "watchdogInit: Fails if watchdog already initialized (has_been_init == true)" {

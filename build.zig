@@ -9,7 +9,6 @@ pub fn build(b: *std.Build) !void {
     defer _ = gpa.deinit();
 
     // defining default options
-    b.reference_trace = 10;
     const def_target = b.standardTargetOptions(.{});
     const def_optimise = b.standardOptimizeOption(.{});
 
@@ -32,46 +31,48 @@ pub fn build(b: *std.Build) !void {
     // ---------- will run if `zig build test` is run from cmd                       ----------
 
     const test_build_step = b.step("test", "Run all tests.");
-    const tests_build_step = b.step("tests", "Run all tests.");
-    const testing_build_step = b.step("testing", "Run all tests.");
 
-    // open the "src" directory --> for checking available files
-    var src_dir: std.fs.Dir = try std.fs.cwd().openDir(b.pathFromRoot("src"), .{
-        .iterate = true,
+    // zga.zig testing
+    const zga_src_lazypath = b.path("./src/zga.zig");
+    var zga_test_step = b.addTest(.{
+        // .name = "ZGA_TEST",
+        .root_source_file = zga_src_lazypath,
+        .target = def_target,
+        .optimize = def_optimise,
     });
-    defer src_dir.close();
-    
-    // Create an iterator to walk through all directory entries inside "src"
-    var src_iter: std.fs.Dir.Iterator = src_dir.iterate();
+    zga_test_step.root_module.addImport("TSQ", TSQ_module);
+    const run_zga_tests = b.addRunArtifact(zga_test_step);
+    test_build_step.dependOn(&run_zga_tests.step); // adding test to fleet of tests
 
-    // Loop over each entry in the "src" directory
-    while (try src_iter.next()) |entry| {
-        if (entry.kind == .file) {
-            if (std.mem.endsWith(u8, entry.name, ".zig")) {
+    // _inotify.zig testing
+    if (def_target.result.os.tag == .linux) {
+        const inotify_src_lazypath = b.path("./src/_inotify.zig");
+        var inotify_test_step = b.addTest(.{
+            .root_source_file = inotify_src_lazypath,
+            .target = def_target,
+            .optimize = def_optimise,
+        });
+        inotify_test_step.root_module.addImport("ZGA", ZGA_module);
+        inotify_test_step.root_module.addImport("TSQ", TSQ_module);
+        const run_inotify_tests = b.addRunArtifact(inotify_test_step);
+        test_build_step.dependOn(&run_inotify_tests.step); // adding test to fleet of tests
+    }
 
-                const src_relative_path: []const u8 = b.fmt("src/{s}", .{entry.name});
-                const src_lazypath = b.path(src_relative_path);
-                const test_name = std.fmt.allocPrint(alloc, "test_{s}", .{entry.name}) catch entry.name;
-                defer alloc.free(test_name);
-
-                var test_step = b.addTest(.{
-                    .name = test_name,
-                    .root_source_file = src_lazypath,
-                    .target = def_target,
-                    .optimize = def_optimise,
-                });
-                test_step.root_module.addImport("ZGA", ZGA_module);
-                test_step.root_module.addImport("TSQ", TSQ_module);
-
-                test_build_step.dependOn(&test_step.step); // adding test to fleet of tests
-                tests_build_step.dependOn(&test_step.step); // adding test to fleet of tests
-                testing_build_step.dependOn(&test_step.step); // adding test to fleet of tests
-            }
-        }
+    // _win.zig testing
+    if (def_target.result.os.tag == .windows) {
+        const win_src_lazypath = b.path("./src/_win.zig");
+        var win_test_step = b.addTest(.{
+            .root_source_file = win_src_lazypath,
+            .target = def_target,
+            .optimize = def_optimise,
+        });
+        win_test_step.root_module.addImport("ZGA", ZGA_module);
+        win_test_step.root_module.addImport("TSQ", TSQ_module);
+        const run_win_tests = b.addRunArtifact(win_test_step);
+        test_build_step.dependOn(&run_win_tests.step); // adding test to fleet of tests
     }
 
     // ---------- Conditional Build: Build Example Executables if '-Dexamples' Option is Enabled ----------   
-    const example_build_step = b.step("example", "Build all examples.");
     const examples_build_step = b.step("examples", "Build all examples.");
 
     // if (should_build_examples == true) { 
@@ -86,8 +87,7 @@ pub fn build(b: *std.Build) !void {
         if (example_file.kind == .file) { // checking that the current file is a regular file
 
             // creating zig strings from NULL terminated ones
-            const path: []const u8= try std.fmt.allocPrint(alloc, "./examples/src/{s}", .{example_file.basename});
-            defer alloc.free(path);
+            const path: []const u8 = b.fmt("./examples/src/{s}", .{example_file.basename});
             const example_file_basename: []const u8 = std.fs.path.stem(example_file.basename);
 
             // grabbing tag names from build flags
@@ -108,8 +108,6 @@ pub fn build(b: *std.Build) !void {
             const curr_exe_install_step = b.addInstallArtifact(curr_exe, .{}); // creating an artifact (exe) for each example
 
             // setting the executable install steps so that they only run if the "examples" step is defined in the zig build
-            example_build_step.dependOn(&curr_exe.step);
-            example_build_step.dependOn(&curr_exe_install_step.step);
             examples_build_step.dependOn(&curr_exe.step);
             examples_build_step.dependOn(&curr_exe_install_step.step);
         }
