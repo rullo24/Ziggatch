@@ -1,3 +1,7 @@
+/// @file zga_watchdog.zig
+///
+/// Cross-platform filesystem watcher for Windows and Linux.
+
 /////////////
 // IMPORTS // 
 /////////////
@@ -59,7 +63,6 @@ pub const ZGA_WATCHDOG: type = struct {
     /// - `self`: The acting watchdog instance.
     /// - `alloc`: Allocator used for internal allocations.
     pub fn init(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
-        // capturing relevant mutexes
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
 
@@ -93,7 +96,7 @@ pub const ZGA_WATCHDOG: type = struct {
     pub fn add(self: *ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
-        if (self.has_been_init == false) return error.WATCHDOG_ALREADY_INIT;
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
 
         self.platform_vars_mutex.lock();
         defer self.platform_vars_mutex.unlock();
@@ -110,6 +113,8 @@ pub const ZGA_WATCHDOG: type = struct {
     pub fn remove(self: *ZGA_WATCHDOG, path: []const u8) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
+
         self.platform_vars_mutex.lock();
         defer self.platform_vars_mutex.unlock();
 
@@ -127,13 +132,14 @@ pub const ZGA_WATCHDOG: type = struct {
     pub fn read(self: *ZGA_WATCHDOG, flags: u32) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
+
         self.platform_vars_mutex.lock();
         defer self.platform_vars_mutex.unlock();
         self.event_queue_mutex.lock();
         defer self.event_queue_mutex.unlock();
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
-
 
         // check if func available on target O/S
         if (std.meta.hasFn(zga_backend, "watchdogRead") == true) {
@@ -147,6 +153,10 @@ pub const ZGA_WATCHDOG: type = struct {
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
     pub fn popEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
+
         self.event_queue_mutex.lock();
         defer self.event_queue_mutex.unlock();
 
@@ -160,6 +170,10 @@ pub const ZGA_WATCHDOG: type = struct {
     /// - `self`: The acting watchdog instance.
     /// - `alloc`: Allocator used to allocate the output slice.
     pub fn drainEventsAlloc(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) ![]ZGA_EVENT {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
+
         self.event_queue_mutex.lock();
         defer self.event_queue_mutex.unlock();
 
@@ -184,6 +198,10 @@ pub const ZGA_WATCHDOG: type = struct {
     /// - `p_func`: Function pointer to a callback that processes each event. Must accept a `*ZGA_EVENT` and a user-provided argument.
     /// - `p_args`: Opaque pointer passed to `p_func` along with each event.
     pub fn processAndClearEvents(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) !void {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
+
         self.event_queue_mutex.lock();
         defer self.event_queue_mutex.unlock();
 
@@ -201,6 +219,10 @@ pub const ZGA_WATCHDOG: type = struct {
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
     pub fn popError(self: *ZGA_WATCHDOG) !anyerror {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
+
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
 
@@ -213,6 +235,10 @@ pub const ZGA_WATCHDOG: type = struct {
     /// - `self`: The acting watchdog instance.
     /// - `alloc`: Allocator used to allocate the output slice.
     pub fn drainErrorsAlloc(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) ![]anyerror {
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
+        
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
 
@@ -238,6 +264,10 @@ pub const ZGA_WATCHDOG: type = struct {
     /// - `p_func`: Callback function applied to each error. Must accept a `*anyerror` and a user-provided argument.
     /// - `p_args`: Opaque pointer passed to `p_func` along with each error.
     pub fn processAndClearErrors(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) !void { 
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
+
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
 
@@ -258,12 +288,13 @@ pub const ZGA_WATCHDOG: type = struct {
     pub fn getWatchlistAlloc(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) ![][]const u8 {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_NOT_INIT;
+
         self.platform_vars_mutex.lock();
         defer self.platform_vars_mutex.unlock();
         self.alloc_mutex.lock();
         defer self.alloc_mutex.unlock();
 
-        if (self.has_been_init == false) return error.WD_HAS_NOT_BEEN_INIT; // return an error for a non-initialised array
         var wd_watchlist = std.ArrayList([]const u8).init(alloc);
         switch (zga_backend) {
             _inotify => {
@@ -295,6 +326,9 @@ pub const ZGA_WATCHDOG: type = struct {
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
     pub fn deinit(self: *ZGA_WATCHDOG) void {
+        // don't check has_been_init --> should safely deinit each if available anyways
+        // if (self.has_been_init == false) return error.WD_HAS_NOT_BEEN_INIT; // return an error for a non-initialised array
+
         // deinit the objs associated inside of the O/S-specific files
         self.platform_vars_mutex.lock();
         defer self.platform_vars_mutex.unlock();

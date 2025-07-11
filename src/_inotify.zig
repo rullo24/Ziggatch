@@ -1,3 +1,7 @@
+/// @file _inotify.zig
+///
+/// Implements a Linux inotify-based filesystem watchdog for monitoring file and directory changes. 
+
 /////////////
 // IMPORTS // 
 /////////////
@@ -81,7 +85,6 @@ pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
 /// - `path`: UTF-8 path to the directory or file to watch.
 /// - `zga_flags`: Bitmask of ZGA event flags indicating which changes to monitor.
 pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, zga_flags: u32) !void {
-    if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
     if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
 
     // will err if there is already a path in the hashmap (already set)
@@ -107,7 +110,6 @@ pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, zga_flags: u32) !v
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 /// - `path`: UTF-8 path to remove from watching.
 pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
-    if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
     if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
 
     // collecting the watchdog descriptor that is tied to the provided path and removing the watcher
@@ -133,7 +135,6 @@ pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
 /// - `zga_flags`: Bitmask of ZGA event flags to filter which changes are captured (unused on Linux).
 pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
-    if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
     if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
 
     // buf to hold read events (read will return all events since last call)
@@ -268,72 +269,335 @@ fn ZGAToInotifyFlags(zga_mask: u32) u32 {
 // watchdogInit //
 
 test "watchdogInit: Successfully initializes watchdog when all preconditions are met" {
-    // 1. Setup a fresh ZGA_WATCHDOG with alloc and all preconditions met
+    // Setup a fresh ZGA_WATCHDOG with alloc and all preconditions met
     const alloc: std.mem.Allocator = std.testing.allocator;
-    var test_wd: zga.ZGA_WATCHDOG = .{};
-    test_wd.has_been_init = false;
-    test_wd.platform_vars.fd = -1;
-    test_wd.platform_vars.opt_hm_path_to_wd = null;
-    test_wd.platform_vars.opt_hm_wd_to_path = null;
+    var wd: zga.ZGA_WATCHDOG = .{};
  
-    // 2. Call watchdogInit --> should succeed w/o errors
-    try watchdogInit(&test_wd, alloc);
+    // Call watchdogInit --> should succeed w/o errors
+    try watchdogInit(&wd, alloc);
 
-    // 3. assert fd is set and hashmaps initialized
-    try std.testing.expect(test_wd.platform_vars.fd >= 0);
-    try std.testing.expect(test_wd.platform_vars.opt_hm_path_to_wd != null);
-    try std.testing.expect(test_wd.platform_vars.opt_hm_wd_to_path != null);
-}
-
-test "watchdogInit: Fails if watchdog already initialized (has_been_init == true)" {
-    // Setup watchdog with has_been_init = true
-    // Call watchdogInit
-    // Assert error.WATCHDOG_ALREADY_INIT returned
+    // assert fd is set and hashmaps initialized
+    try std.testing.expect(wd.platform_vars.fd >= 0);
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_wd != null);
+    try std.testing.expect(wd.platform_vars.opt_hm_wd_to_path != null);
 }
 
 test "watchdogInit: Fails if file descriptor already set (platform_vars.fd >= 0)" {
     // Setup watchdog with platform_vars.fd >= 0
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    wd.platform_vars.fd = 2;
+
     // Call watchdogInit
+    const result = watchdogInit(&wd, alloc);
+
     // Assert error.WATCHDOG_FILE_DESC_ALREADY_SET returned
+    try std.testing.expectError(error.WATCHDOG_FILE_DESC_ALREADY_SET, result);
 }
 
-test "watchdogInit: Fails if path-to-watchdog hashmap already initialized (opt_hm_path_to_wd != null)" {
+test "watchdogInit: Fails if path-to-watchdog hashmap already initialised (opt_hm_path_to_wd != null)" {
+    // init hashmap
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    const hm = std.StringHashMap(i32).init(alloc);
+
     // Setup watchdog with opt_hm_path_to_wd != null
+    var wd: zga.ZGA_WATCHDOG = .{};
+    wd.platform_vars.opt_hm_path_to_wd = hm; 
+
     // Call watchdogInit
+    const result = watchdogInit(&wd, alloc);
+
     // Assert error.PATH_TO_WATCHDOG_HASHMAP_ALREADY_INIT returned
+    try std.testing.expectError(error.PATH_TO_WATCHDOG_HASHMAP_ALREADY_INIT, result);
 }
 
-test "watchdogInit: Fails if watchdog-to-path hashmap already initialized (opt_hm_wd_to_path != null)" {
+test "watchdogInit: Fails if watchdog-to-path hashmap already initialised (opt_hm_wd_to_path != null)" {
+    // init hashmap
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    const hm = std.AutoHashMap(i32, []const u8).init(alloc);
+
     // Setup watchdog with opt_hm_wd_to_path != null
+    var wd: zga.ZGA_WATCHDOG = .{};
+    wd.platform_vars.opt_hm_wd_to_path = hm;
+
     // Call watchdogInit
+    const result = watchdogInit(&wd, alloc);
+
     // Assert error.WATCHDOG_TO_PATH_HASHMAP_ALREADY_INIT returned
-}
-
-test "watchdogInit: Fails if allocator is null" {
-    // Setup watchdog with alloc = null
-    // Call watchdogInit
-    // Assert appropriate error returned or behavior (depending on code)
-}
-
-test "watchdogInit: Cleans up file descriptor if error occurs during hashmap initialization" {
-    // This might require mocking or instrumentation
-    // Simulate an error during hashmap init or adding watchers
-    // Ensure fd is closed on error
+    try std.testing.expectError(error.WATCHDOG_TO_PATH_HASHMAP_ALREADY_INIT, result);
 }
 
 test "watchdogInit: Validates that file descriptor is valid (> 0) after initialization" {
-    // Setup a fresh watchdog and call watchdogInit
+    // Setup a fresh watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+
+    // Call watchdogInit
+    try watchdogInit(&wd, alloc);
+
     // Assert that platform_vars.fd > 0 after init
+    try std.testing.expect(wd.platform_vars.fd > 0);
 }
+
+test "watchdogInit: Idempotency: Re-calling deinit followed by init should succeed" {
+    // Setup and init a fresh watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+
+    // Call watchdog.deinit to reset its internal state
+    wd.deinit();
+
+    // Call watchdogInit again
+    try watchdogInit(&wd, alloc);
+}
+
+// test "watchdogInit: Cleans up file descriptor if error occurs during 1st hashmap initialization" {
+//     const alloc = std.testing.allocator;
+//     var wd: zga.ZGA_WATCHDOG = .{};
+
+//     // Use a failing allocator that fails immediately, so hashmap init fails on first alloc
+//     const FailAllocType: type = fail.FailingAllocator(0, alloc);
+//     const fail_alloc: std.mem.Allocator = FailAllocType{};
+
+//     // Call watchdogInit with failing allocator
+//     const err = watchdogInit(&wd, fail_alloc);
+
+//     // Expect an error (likely OutOfMemory or allocation failure)
+//     try std.testing.expectError(error.OutOfMemory, err);
+
+//     // Assert that all values in struct are not init after fail
+//     try std.testing.expect(wd.platform_vars.fd == -1);
+//     try std.testing.expect(wd.platform_vars.opt_hm_path_to_wd == null);
+//     try std.testing.expect(wd.platform_vars.opt_hm_wd_to_path == null);
+// }
+
+
+// test "watchdogInit: Cleans up file descriptor and 1st hashmap if error occurs during 2nd hashmap initialization" {
+//     const alloc = std.testing.allocator;
+//     var wd: zga.ZGA_WATCHDOG = .{};
+
+//     // Use a failing allocator that fails immediately, so hashmap init fails on first alloc
+//     const FailAllocType: type = fail.FailingAllocator(0, alloc);
+//     const fail_alloc: std.mem.Allocator = FailAllocType{};
+
+//     // Call watchdogInit with failing allocator
+//     const err = watchdogInit(&wd, fail_alloc);
+
+//     // Expect an error (likely OutOfMemory or allocation failure)
+//     try std.testing.expectError(error.OutOfMemory, err);
+
+//     // Assert that all values in struct are not init after fail
+//     try std.testing.expect(wd.platform_vars.fd == -1);
+//     try std.testing.expect(wd.platform_vars.opt_hm_path_to_wd == null);
+//     try std.testing.expect(wd.platform_vars.opt_hm_wd_to_path == null);
+// }
 
 // watchdogAdd //
 
+test "watchdogAdd: Fails if file descriptor not set (fd < 0)" {
+    // Setup watchdog with has_been_init == true but fd == -1
+    const alloc = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    try watchdogInit(&wd, alloc);
+    wd.platform_vars.fd = -1;
+
+    // Call watchdogAdd, expect error.WATCHDOG_FILE_DESC_NOT_SET
+    const result = watchdogAdd(&wd, "./test/test_file.txt", zga.ZGA_CREATE); 
+    try std.testing.expectError(error.WATCHDOG_FILE_DESC_NOT_SET, result);
+}
+
+test "watchdogAdd: Fails if path already added" {
+    // Setup and init watchdog, add path to hashmap manually
+
+    // Call watchdogAdd with the same path, expect error.WATCHDOG_ALREADY_ADDED_FOR_PATH
+}
+
+test "watchdogAdd: Fails if no flags parsed (inotify flags == 0)" {
+    // Setup watchdog, has_been_init true, fd valid
+
+    // Call watchdogAdd with zero flags, expect error.NO_FLAGS_PARSED
+}
+
+test "watchdogAdd: Successfully adds a path and watch descriptor" {
+    // Setup watchdog fully initialized
+
+    // Call watchdogAdd with valid path and flags
+
+    // Verify hashmap entries exist for path and wd
+}
+
+test "watchdogAdd: Fails if inotify_add_watch returns error" {
+    // Setup watchdog fully initialized with fd but simulate posix.inotify_add_watch failure
+
+    // Call watchdogAdd, expect error.FAILED_TO_ADD_WATCHDOG_FILE
+}
+
+test "watchdogAdd: Correctly converts ZGA flags to inotify flags" {
+    // Setup watchdog fully initialized
+
+    // Call watchdogAdd with various zga_flags combinations
+
+    // Assert internal inotify flags are set accordingly (mock or intercept)
+}
+
+test "watchdogAdd: Adds multiple different paths successfully" {
+    // Setup watchdog fully initialized
+
+    // Add several different paths
+
+    // Assert all paths and watch descriptors present in hashmaps
+}
+
+test "watchdogAdd: Invalid file location parsed to add func" {
+    // setup watchdog
+
+    // run watchdogAdd with path to invalid loc
+
+    // Assert error on result
+
+}
 
 // watchdogRemove //
 
+test "watchdogRemove: Fails if watchdog not initialized" {
+    // Setup watchdog with has_been_init == false
+
+    // Call watchdogRemove, expect error.WATCHDOG_NOT_INIT
+}
+
+test "watchdogRemove: Fails if file descriptor not set" {
+    // Setup watchdog with has_been_init == true but fd == -1
+
+    // Call watchdogRemove, expect error.WATCHDOG_FILE_DESC_NOT_SET
+}
+
+test "watchdogRemove: Fails if path not in hashmap" {
+    // Setup and initialize watchdog
+
+    // Call watchdogRemove with a path not in hashmap, expect error.HM_DOES_NOT_CONTAIN_PATH_AS_KEY
+}
+
+test "watchdogRemove: Successfully removes a watched path" {
+    // Setup and initialize watchdog
+
+    // Add path to watchlist
+
+    // Call watchdogRemove with added path
+
+    // Verify hashmap entries for path and wd are removed
+}
+
+test "watchdogRemove: Fails if hashmaps are null" {
+    // Setup watchdog with has_been_init == true but hashmaps null
+
+    // Call watchdogRemove, expect error about hashmap not initialized
+}
+
+test "watchdogRemove: Fails if removal from hashmap returns false" {
+    // Setup watchdog with hashmaps
+
+    // Simulate hashmap remove returning false
+
+    // Call watchdogRemove, expect error about removal failure
+}
+
+test "watchdogRemove: Handles invalid watch descriptor gracefully" {
+    // Setup watchdog, add path with invalid watch descriptor
+
+    // Call watchdogRemove, expect graceful removal or specific error
+}
 
 // watchdogRead //
 
+test "watchdogRead: Fails if watchdog not initialized" {
+    // Setup watchdog with has_been_init == false
+
+    // Call watchdogRead, expect error.WATCHDOG_NOT_INIT
+}
+
+test "watchdogRead: Fails if file descriptor not set" {
+    // Setup watchdog with has_been_init == true but fd == -1
+
+    // Call watchdogRead, expect error.WATCHDOG_FILE_DESC_NOT_SET
+}
+
+test "watchdogRead: Successfully reads and processes events" {
+    // Setup and initialize watchdog with real or mock fd
+
+    // Add watch to trigger events
+
+    // Trigger a filesystem event
+
+    // Call watchdogRead to process events
+
+    // Verify event queue contains expected events
+}
+
+test "watchdogRead: Adds EVENT_READ_OVERFLOWED_SOME_EVENTS_LOST on IN_Q_OVERFLOW" {
+    // Setup watchdog with events including IN_Q_OVERFLOW
+
+    // Call watchdogRead
+
+    // Assert error event added to queue
+}
+
+test "watchdogRead: Ignores IN_IGNORED events" {
+    // Setup watchdog with IN_IGNORED events
+
+    // Call watchdogRead
+
+    // Assert no events added for ignored masks
+}
+
+
+test "watchdogRead: No events processed if read returns zero" {
+    // Setup watchdog
+
+    // Simulate posix.read returns 0 bytes
+
+    // Call watchdogRead and expect no events enqueued
+}
+
+test "watchdogRead: Returns error if wd_to_path hashmap is null during event processing" {
+    // Setup watchdog with opt_hm_wd_to_path null
+
+    // Simulate event without filename
+
+    // Call watchdogRead, expect error.HM_WD_TO_PATH_NOT_INIT
+}
 
 // watchdogDeinit//
 
+test "watchdogDeinit: Properly cleans up all resources" {
+    // Setup and initialize watchdog
+
+    // Add some paths/watch descriptors
+
+    // Call watchdogDeinit
+
+    // Assert fd reset to -1
+
+    // Assert hashmaps are null
+}
+
+test "watchdogDeinit: No error if deinit called multiple times" {
+    // Setup watchdog in a deinitialized state
+
+    // Call watchdogDeinit multiple times to confirm idempotency
+}
+
+test "watchdogDeinit: Succeeds when called with null hashmaps" {
+    // Setup watchdog with fd set but null hashmaps
+
+    // Call watchdogDeinit, expect no error and cleanup fd
+}
+
+test "watchdogDeinit: Succeeds if file descriptor already closed or invalid" {
+    // Setup watchdog with fd set to invalid value (-1 or closed)
+
+    // Call watchdogDeinit, expect no error and reset state
+}
+
+////////////////////////////
+// PRIVATE FUNCTION TESTS //
+////////////////////////////

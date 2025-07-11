@@ -1,3 +1,7 @@
+/// @file _win.zig
+///
+/// Implements a Windows win32-based filesystem watchdog for monitoring file and directory changes. 
+
 /////////////
 // IMPORTS // 
 /////////////
