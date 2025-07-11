@@ -80,7 +80,7 @@ pub const ZGA_WATCHDOG: type = struct {
 
         // initialise O/S-specific vars and buffers
         if (std.meta.hasFn(zga_backend, "watchdogInit") == true) { // check if func available on target o/s
-            try zga_backend.watchdogInit(self, alloc); // run O/S-specific func
+            try zga_backend.watchdogInit(&self.platform_vars, alloc); // run O/S-specific func
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND; 
 
         // flip flag so that other methods can now be run
@@ -101,7 +101,7 @@ pub const ZGA_WATCHDOG: type = struct {
         self.platform_vars_mutex.lock();
         defer self.platform_vars_mutex.unlock();
         if (std.meta.hasFn(zga_backend, "watchdogAdd")) { // check if func available on target o/s
-            try zga_backend.watchdogAdd(self, path, flags); // running O/S-specific func
+            try zga_backend.watchdogAdd(&self.platform_vars, path, flags); // running O/S-specific func
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
@@ -120,7 +120,7 @@ pub const ZGA_WATCHDOG: type = struct {
 
         // check if func available on target O/S
         if (std.meta.hasFn(zga_backend, "watchdogRemove")) { 
-            try zga_backend.watchdogRemove(self, path);
+            try zga_backend.watchdogRemove(&self.platform_vars, path);
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
@@ -143,7 +143,7 @@ pub const ZGA_WATCHDOG: type = struct {
 
         // check if func available on target O/S
         if (std.meta.hasFn(zga_backend, "watchdogRead") == true) {
-            zga_backend.watchdogRead(self, flags) catch |read_err| {
+            zga_backend.watchdogRead(&self.platform_vars, flags, &self.event_queue, &self.error_queue) catch |read_err| {
                 if (read_err != error.WouldBlock) return read_err; // error.WouldBlock returned when no data is available (only return other errors)
             };
         } else return error.watchdogRead_FUNC_NOT_AVAIL_ON_OS; 
@@ -295,30 +295,14 @@ pub const ZGA_WATCHDOG: type = struct {
         self.alloc_mutex.lock();
         defer self.alloc_mutex.unlock();
 
-        var wd_watchlist = std.ArrayList([]const u8).init(alloc);
-        switch (zga_backend) {
-            _inotify => {
-                if (self.platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| {
-                    var hm_iterator = p_hm_path_to_wd.iterator();
-                    while (hm_iterator.next()) |hm_val| { // iterate over all hashmap values --> required for deinit watchdogs via inotify
-                        const curr_hm_val_str: []const u8 = hm_val.key_ptr.*; // collecting the key from the hashmap "Entry"
-                        try wd_watchlist.append(curr_hm_val_str);
-                    }
-                }
-            }, 
-            _win => {
-                if (self.platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
-                    var hm_iterator = p_hm_path_to_handle.iterator();
-                    while (hm_iterator.next()) |hm_val| {
-                        const curr_hm_val_str: []const u8 = hm_val.key_ptr.*; // collecting path key from hashmap "Entry"
-                        try wd_watchlist.append(curr_hm_val_str);
-                    }
-                }
-            }, 
-            else => @compileError("ERROR: invalid backend")
-        }
-        
-        return wd_watchlist.toOwnedSlice(); // to be free'd externally
+        // check if func available on target O/S
+        if (std.meta.hasFn(zga_backend, "watchdogList") == true) { 
+            return zga_backend.watchdogList(&self.platform_vars, alloc) catch |read_err| {
+                if (read_err != error.WouldBlock) return read_err; // error.WouldBlock returned when no data is available (only return other errors)
+            };
+        } else return error.watchdogRead_FUNC_NOT_AVAIL_ON_OS; 
+
+        unreachable; // should have returned by this point
     }
 
     /// Cleans up all watchdog resources, freeing internal allocations. After this call, the object must be re-initialised before reuse.
@@ -333,7 +317,7 @@ pub const ZGA_WATCHDOG: type = struct {
         self.platform_vars_mutex.lock();
         defer self.platform_vars_mutex.unlock();
         if (std.meta.hasFn(zga_backend, "watchdogDeinit")) { // check if func available on target o/s
-            zga_backend.watchdogDeinit(self);
+            zga_backend.watchdogDeinit(&self.platform_vars);
         }
 
         // iterating over event queue --> cleaning and clearing

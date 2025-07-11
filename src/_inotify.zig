@@ -56,11 +56,12 @@ pub const INOTIFY_VARS = struct {
 /// Must be called before using other watchdog functions.
 ///
 /// PARAMS:
-/// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
-pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
-    if (p_wd.platform_vars.fd >= 0) return error.WATCHDOG_FILE_DESC_ALREADY_SET;
-    if (p_wd.platform_vars.opt_hm_path_to_wd != null) return error.PATH_TO_WATCHDOG_HASHMAP_ALREADY_INIT;
-    if (p_wd.platform_vars.opt_hm_wd_to_path != null) return error.WATCHDOG_TO_PATH_HASHMAP_ALREADY_INIT;
+/// - `p_platform_vars`: Pointer to the INOTIFY_VARS object used for storing variables relevant to inotify
+/// - `alloc`: Allocator for internal values.
+pub fn watchdogInit(p_platform_vars: *INOTIFY_VARS, alloc: std.mem.Allocator) !void {
+    if (p_platform_vars.fd >= 0) return error.WATCHDOG_FILE_DESC_ALREADY_SET;
+    if (p_platform_vars.opt_hm_path_to_wd != null) return error.PATH_TO_WATCHDOG_HASHMAP_ALREADY_INIT;
+    if (p_platform_vars.opt_hm_wd_to_path != null) return error.WATCHDOG_TO_PATH_HASHMAP_ALREADY_INIT;
 
     // init inotify file desc
     const fd: i32 = try posix.inotify_init1(IN_CLOEXEC); // synchronous (blocking)
@@ -73,75 +74,85 @@ pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
     errdefer wd_to_path_hm.deinit();
 
     // if no errors have occurred --> set values now
-    p_wd.platform_vars.fd = fd; // setting fd in global iNotify vars
-    p_wd.platform_vars.opt_hm_path_to_wd = path_to_wd_hm;
-    p_wd.platform_vars.opt_hm_wd_to_path = wd_to_path_hm;
+    p_platform_vars.fd = fd; // setting fd in global iNotify vars
+    p_platform_vars.opt_hm_path_to_wd = path_to_wd_hm;
+    p_platform_vars.opt_hm_wd_to_path = wd_to_path_hm;
 }
 
 /// adds a directory or file path to the watchlist with specified event flags.
 ///
 /// PARAMS:
-/// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
+/// - `p_platform_vars`: Pointer to the INOTIFY_VARS object used for storing variables relevant to inotify
 /// - `path`: UTF-8 path to the directory or file to watch.
 /// - `zga_flags`: Bitmask of ZGA event flags indicating which changes to monitor.
-pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, zga_flags: u32) !void {
-    if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
+pub fn watchdogAdd(p_platform_vars: *INOTIFY_VARS, path: []const u8, zga_flags: u32) !void {
+    if (p_platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
+
+    // checking if flags are valid
+    const inotify_flags: u32 = ZGAToInotifyFlags(zga_flags);
+    if (inotify_flags == 0x0) return error.NO_FLAGS_PARSED;
 
     // will err if there is already a path in the hashmap (already set)
-    if (p_wd.platform_vars.opt_hm_path_to_wd) |hm_path_to_wd| {
+    if (p_platform_vars.opt_hm_path_to_wd) |hm_path_to_wd| {
         if (hm_path_to_wd.contains(path) == true) return error.WATCHDOG_ALREADY_ADDED_FOR_PATH; 
     } else return error.WATCHDOG_TO_PATH_HASHMAP_NOT_INIT;
 
     // adding new watcher w/ flags (parsed)
-    const inotify_flags: u32 = ZGAToInotifyFlags(zga_flags);
-    if (inotify_flags == 0x0) return error.NO_FLAGS_PARSED;
-    const watch_desc: i32 = try posix.inotify_add_watch(p_wd.platform_vars.fd, path, inotify_flags);
-    errdefer posix.inotify_rm_watch(p_wd.platform_vars.fd, watch_desc); // remove watchdog if can't add it to hashmap
+    const watch_desc: i32 = try posix.inotify_add_watch(p_platform_vars.fd, path, inotify_flags);
+    errdefer posix.inotify_rm_watch(p_platform_vars.fd, watch_desc); // remove watchdog if can't add it to hashmap
     if (watch_desc < 0) return error.FAILED_TO_ADD_WATCHDOG_FILE;
 
     // adding watchdog descriptor to the global hashmaps
-    if (p_wd.platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| try p_hm_path_to_wd.put(path, watch_desc);
-    if (p_wd.platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| try p_hm_wd_to_path.put(watch_desc, path);
+    if (p_platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| {
+        try p_hm_path_to_wd.put(path, watch_desc);
+    } else return error.HM_PATH_TO_WD_NOT_INIT;
+    if (p_platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| {
+        try p_hm_wd_to_path.put(watch_desc, path);
+    } else return error.HM_WD_TO_PATH_NOT_INIT;
 }
 
 /// removes a watched path from the watchlist.
 ///
 /// PARAMS:
-/// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
+/// - `p_platform_vars`: Pointer to the INOTIFY_VARS object used for storing variables relevant to inotify
 /// - `path`: UTF-8 path to remove from watching.
-pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
-    if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
+pub fn watchdogRemove(p_platform_vars: *INOTIFY_VARS, path: []const u8) !void {
+    if (p_platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
 
     // collecting the watchdog descriptor that is tied to the provided path and removing the watcher
-    if (p_wd.platform_vars.opt_hm_path_to_wd) |hm_path_to_wd| {
+    if (p_platform_vars.opt_hm_path_to_wd) |hm_path_to_wd| {
         if (hm_path_to_wd.get(path)) |wd_from_path| {
-            posix.inotify_rm_watch(p_wd.platform_vars.fd, wd_from_path); // remove watchdog if can't add it to hashmap
-            if (p_wd.platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| {
+            posix.inotify_rm_watch(p_platform_vars.fd, wd_from_path); // remove watchdog if can't add it to hashmap
+            if (p_platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| {
                 const wd_rm_resp_wd: bool = p_hm_wd_to_path.remove(wd_from_path); // removing entry from hashmap
                 if (wd_rm_resp_wd == false) return error.ATTEMPT_TO_REMOVE_WD_THAT_DOES_NOT_EXIST_IN_HASHMAP;
-            }
+            } else return error.HM_WD_TO_PATH_NOT_INIT;
 
-            if (p_wd.platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| {
+            if (p_platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| {
                 const wd_rm_resp_path: bool = p_hm_path_to_wd.remove(path); // removing entry from hashmap
                 if (wd_rm_resp_path == false) return error.ATTEMPT_TO_REMOVE_PATH_THAT_DOES_NOT_EXIST_IN_HASHMAP;
             }
-        } else return error.HM_DOES_NOT_CONTAIN_PATH_AS_KEY;
+        } else return error.HM_PATH_TO_WD_NOT_INIT;
     }
 }
 
 /// reads file change events and pushes them to the event queue.
 ///
 /// PARAMS:
-/// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
+/// - `p_platform_vars`: Pointer to the INOTIFY_VARS object used for storing variables relevant to inotify
 /// - `zga_flags`: Bitmask of ZGA event flags to filter which changes are captured (unused on Linux).
-pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
-    if (p_wd.platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
+/// - `p_event_queue`: Pointer to the event queue used for storing file events from the watchdog
+/// - `p_error_queue`: Pointer to the error queue used for storing error events from the watchdog
+pub fn watchdogRead(p_platform_vars: *INOTIFY_VARS, zga_flags: u32, p_event_queue: *std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice), p_error_queue: *std.fifo.LinearFifo(anyerror, .Slice)) !void {
+    if (p_platform_vars.fd < 0) return error.WATCHDOG_FILE_DESC_NOT_SET;
+
+    // NOTE: flags don't require checking as they are not used in Linux _inotify watchdogRead()
 
     // buf to hold read events (read will return all events since last call)
     var buf: [INOTIFY_READ_BUF_LEN]u8 = undefined; // u8 == byte --> matches with @sizeOf()
 
     // posix.read WILL block until data is available
-    const len_read: usize = try posix.read(p_wd.platform_vars.fd, buf[0..INOTIFY_READ_BUF_LEN]); 
+    const len_read: usize = try posix.read(p_platform_vars.fd, buf[0..INOTIFY_READ_BUF_LEN]); 
     if (len_read == 0) return; // nothing read
     
     // iterating over all values in read buffer --> checking maps
@@ -149,9 +160,11 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
     while (i < len_read) { // iterating over all read inotify responses
         const p_curr_event: *linux.inotify_event = @alignCast(@ptrCast(buf[i..].ptr)); // cast bytes to aligned inotify_event ptr
         if ((p_curr_event.mask & IN_Q_OVERFLOW) != 0) { // occurs if the provided buffer is too small for the num of events or removed inotify event comes through
-            try p_wd.error_queue.writeItem(error.EVENT_READ_OVERFLOWED_SOME_EVENTS_LOST);
+            try p_error_queue.writeItem(error.EVENT_READ_OVERFLOWED_SOME_EVENTS_LOST); // writing to err queue
+
         } else if ((p_curr_event.mask & IN_IGNORED) != 0) {
             // pass --> do nothing for ignored events
+
         } else {
             // adding the event to the global queue --> for processing in ZGA
             var zga_curr_event: zga.ZGA_EVENT = .{}; // def vals
@@ -168,7 +181,7 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
                 zga_curr_event.zga_flags = inotifyToZGAFlags(p_curr_event.mask);
 
             } else { // if attached directly to file
-                if (p_wd.platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| {
+                if (p_platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| {
                     const scope_temp_filename: []const u8 = p_hm_wd_to_path.get(p_curr_event.wd) orelse return error.COULD_NOT_FIND_EVENT_WD_IN_HM; // doesn't require allocated mem (stored on heap already --> free'd on deinit of watchdog or watchdogRemove)
                     
                     // copying filename to event obj
@@ -180,7 +193,7 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
             }
 
             // adding the event to the global queue 
-            try p_wd.event_queue.writeItem(zga_curr_event);
+            try p_event_queue.writeItem(zga_curr_event);
         }
 
         // incrementing ptr to next event
@@ -188,17 +201,34 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
     }
 }
 
-/// cleans up all inotify-related watchdog resources.
-///
+/// Returns a slice of filepath strings that are currently being watched. The returned slice must be deallocated externally after use.
+/// 
 /// PARAMS:
-/// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
-pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) void {
-    // iterate over each wd_desc and call watchdogRemove on it + destroy the hashmap after doing so
-    if (p_wd.platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| {
+/// - `p_platform_vars`: Pointer to the INOTIFY_VARS object used for storing variables relevant to inotify
+/// - `alloc`: Allocator for internal values.
+pub fn watchdogList(p_platform_vars: *INOTIFY_VARS, alloc: std.mem.Allocator) ![]const []const u8 {
+    var wd_watchlist = std.ArrayList([]const u8).init(alloc);
+    if (p_platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| {
         var hm_iterator = p_hm_path_to_wd.iterator();
         while (hm_iterator.next()) |hm_val| { // iterate over all hashmap values --> required for deinit watchdogs via inotify
             const curr_hm_val_str: []const u8 = hm_val.key_ptr.*; // collecting the key from the hashmap "Entry"
-            watchdogRemove(p_wd, curr_hm_val_str) catch {}; // remove each hashmap key --> don't react to removal err to properly clean on end of func
+            try wd_watchlist.append(curr_hm_val_str);
+        }
+    } else return error.HM_PATH_TO_WD_NOT_INIT;
+    return wd_watchlist.toOwnedSlice(); // to be dealloc'd externally by user
+}
+
+/// cleans up all inotify-related watchdog resources.
+///
+/// PARAMS:
+/// - `p_platform_vars`: Pointer to the INOTIFY_VARS object used for storing variables relevant to inotify
+pub fn watchdogDeinit(p_platform_vars: *INOTIFY_VARS) void {
+    // iterate over each wd_desc and call watchdogRemove on it + destroy the hashmap after doing so
+    if (p_platform_vars.opt_hm_path_to_wd) |*p_hm_path_to_wd| {
+        var hm_iterator = p_hm_path_to_wd.iterator();
+        while (hm_iterator.next()) |hm_val| { // iterate over all hashmap values --> required for deinit watchdogs via inotify
+            const curr_hm_val_str: []const u8 = hm_val.key_ptr.*; // collecting the key from the hashmap "Entry"
+            watchdogRemove(p_platform_vars, curr_hm_val_str) catch {}; // remove each hashmap key --> don't react to removal err to properly clean on end of func
         }
 
         // destroy the hashmap (path --> wd)
@@ -207,15 +237,15 @@ pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) void {
     } // don't return error if already null --> being set to null anyways
 
     // destroying data structures --> heap allocated (destroy the hashmap wd --> path)
-    if (p_wd.platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| p_hm_wd_to_path.deinit(); // don't return error if already null --> being set to null anyways
+    if (p_platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| p_hm_wd_to_path.deinit(); // don't return error if already null --> being set to null anyways
 
     // closing the file descriptor (POSIX) if available/open
-    if (p_wd.platform_vars.fd > -1) std.posix.close(p_wd.platform_vars.fd); // closing file descriptor (if applicable)
+    if (p_platform_vars.fd > -1) std.posix.close(p_platform_vars.fd); // closing file descriptor (if applicable)
 
     // if no errors have occurred --> reset values now
-    p_wd.platform_vars.fd = -1; 
-    p_wd.platform_vars.opt_hm_path_to_wd = null;
-    p_wd.platform_vars.opt_hm_wd_to_path = null;
+    p_platform_vars.fd = -1; 
+    p_platform_vars.opt_hm_path_to_wd = null;
+    p_platform_vars.opt_hm_wd_to_path = null;
 }
 
 ///////////////////////////////////
