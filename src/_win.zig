@@ -196,12 +196,10 @@ pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) void {
         // destroy the hashmap (path --> wd)
         p_hm_path_to_handle.deinit(); 
 
-    }
+    } // don't return error if already null --> being set to null anyways
 
-    // destroying data structures --> heap allocated
-    if (p_wd.platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
-        p_hm_handle_to_path.deinit(); // destroy the hashmap (wd --> path)
-    }
+    // destroy the hashmap (wd --> path)
+    if (p_wd.platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| p_hm_handle_to_path.deinit(); // don't return error if already null --> being set to null anyways
 
     // if no errors have occurred --> reset values now
     p_wd.platform_vars.opt_hm_path_to_handle = null;

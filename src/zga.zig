@@ -59,27 +59,29 @@ pub const ZGA_WATCHDOG: type = struct {
     /// - `self`: The acting watchdog instance.
     /// - `alloc`: Allocator used for internal allocations.
     pub fn init(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
+        // capturing relevant mutexes
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
+
+        self.event_queue_mutex.lock();
+        defer self.event_queue_mutex.unlock();
+        self.error_queue_mutex.lock();
+        defer self.error_queue_mutex.unlock();
+
+        self.platform_vars_mutex.lock();
+        defer self.platform_vars_mutex.unlock();
+
         if (self.has_been_init == true) return error.ZGA_WATCHDOG_OBJ_ALREADY_INITIALISED;
+        self.event_queue = std.fifo.LinearFifo(ZGA_EVENT, .Slice).init(&event_buf); // init the LinearFIFO 
+        self.error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(&error_buf); // init the LinearFIFO 
 
-        {
-            self.event_queue_mutex.lock();
-            defer self.event_queue_mutex.unlock();
-            self.event_queue = std.fifo.LinearFifo(ZGA_EVENT, .Slice).init(&event_buf); // init the LinearFIFO 
-        }
-
-        {
-            self.error_queue_mutex.lock();
-            defer self.error_queue_mutex.unlock();
-            self.error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(&error_buf); // init the LinearFIFO 
-        }
-        
         // initialise O/S-specific vars and buffers
-        if (std.meta.hasFn(zga_backend, "watchdogInit")) { // check if func available on target o/s
-            try zga_backend.watchdogInit(self, alloc); 
+        if (std.meta.hasFn(zga_backend, "watchdogInit") == true) { // check if func available on target o/s
+            try zga_backend.watchdogInit(self, alloc); // run O/S-specific func
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND; 
-        self.has_been_init = true; // flag so that other methods cannot be run before initialisation
+
+        // flip flag so that other methods can now be run
+        self.has_been_init = true; 
     }
 
     /// Adds a path (file or directory) to the watchlist with specified event flags.
@@ -91,11 +93,12 @@ pub const ZGA_WATCHDOG: type = struct {
     pub fn add(self: *ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
         self.has_been_init_mutex.lock();
         defer self.has_been_init_mutex.unlock();
+        if (self.has_been_init == false) return error.WATCHDOG_ALREADY_INIT;
+
         self.platform_vars_mutex.lock();
         defer self.platform_vars_mutex.unlock();
-
         if (std.meta.hasFn(zga_backend, "watchdogAdd")) { // check if func available on target o/s
-            try zga_backend.watchdogAdd(self, path, flags);
+            try zga_backend.watchdogAdd(self, path, flags); // running O/S-specific func
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
@@ -110,7 +113,8 @@ pub const ZGA_WATCHDOG: type = struct {
         self.platform_vars_mutex.lock();
         defer self.platform_vars_mutex.unlock();
 
-        if (std.meta.hasFn(zga_backend, "watchdogRemove")) { // check if func available on target o/s
+        // check if func available on target O/S
+        if (std.meta.hasFn(zga_backend, "watchdogRemove")) { 
             try zga_backend.watchdogRemove(self, path);
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
@@ -130,10 +134,13 @@ pub const ZGA_WATCHDOG: type = struct {
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
 
-        if (std.meta.hasFn(zga_backend, "watchdogRead") == false) return error.watchdogRead_FUNC_NOT_AVAIL_ON_OS; // check if func available on target o/s
+
+        // check if func available on target O/S
+        if (std.meta.hasFn(zga_backend, "watchdogRead") == true) {
             zga_backend.watchdogRead(self, flags) catch |read_err| {
                 if (read_err != error.WouldBlock) return read_err; // error.WouldBlock returned when no data is available (only return other errors)
             };
+        } else return error.watchdogRead_FUNC_NOT_AVAIL_ON_OS; 
     }
 
     /// Pops a single event from the event queue. Returns null if there aren't any available queue values
@@ -176,7 +183,7 @@ pub const ZGA_WATCHDOG: type = struct {
     /// - `self`: The acting watchdog instance.
     /// - `p_func`: Function pointer to a callback that processes each event. Must accept a `*ZGA_EVENT` and a user-provided argument.
     /// - `p_args`: Opaque pointer passed to `p_func` along with each event.
-    pub fn processAndClearEvents(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) void {
+    pub fn processAndClearEvents(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) !void {
         self.event_queue_mutex.lock();
         defer self.event_queue_mutex.unlock();
 
@@ -197,7 +204,7 @@ pub const ZGA_WATCHDOG: type = struct {
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
 
-        return self.error_queue.readItem() orelse error.ERROR_QUEUE_EMPTY;
+        return self.error_queue.readItem() orelse error.EMPTY_ERROR_QUEUE;
     }
 
     /// Pops all available errors from the error queue and returns them as an allocated slice.
@@ -230,7 +237,7 @@ pub const ZGA_WATCHDOG: type = struct {
     /// - `self`: The acting watchdog instance.
     /// - `p_func`: Callback function applied to each error. Must accept a `*anyerror` and a user-provided argument.
     /// - `p_args`: Opaque pointer passed to `p_func` along with each error.
-    pub fn processAndClearErrors(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) void { 
+    pub fn processAndClearErrors(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) !void { 
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
 
@@ -289,35 +296,26 @@ pub const ZGA_WATCHDOG: type = struct {
     /// - `self`: The acting watchdog instance.
     pub fn deinit(self: *ZGA_WATCHDOG) void {
         // deinit the objs associated inside of the O/S-specific files
-        {
-            self.platform_vars_mutex.lock();
-            defer self.platform_vars_mutex.unlock();
-
-            if (std.meta.hasFn(zga_backend, "watchdogDeinit")) { // check if func available on target o/s
-                zga_backend.watchdogDeinit(self);
-            }
+        self.platform_vars_mutex.lock();
+        defer self.platform_vars_mutex.unlock();
+        if (std.meta.hasFn(zga_backend, "watchdogDeinit")) { // check if func available on target o/s
+            zga_backend.watchdogDeinit(self);
         }
 
         // iterating over event queue --> cleaning and clearing
-        {
-            self.event_queue_mutex.lock();
-            defer self.event_queue_mutex.unlock();
-            self.event_queue.deinit(); // only does anything if set to .Dynamic mode --> leave here for readability
-        }
+        self.event_queue_mutex.lock();
+        defer self.event_queue_mutex.unlock();
+        self.event_queue.deinit(); // only does anything if set to .Dynamic mode --> leave here for readability
 
         // iterating over error queue --> cleaning and clearing
-        {
-            self.error_queue_mutex.lock();
-            defer self.error_queue_mutex.unlock();
-            self.error_queue.deinit(); // only does anything if set to .Dynamic mode --> leave here for readability
-        }
+        self.error_queue_mutex.lock();
+        defer self.error_queue_mutex.unlock();
+        self.error_queue.deinit(); // only does anything if set to .Dynamic mode --> leave here for readability
 
         // restating the object as uninitialised
-        {
-            self.has_been_init_mutex.lock();
-            defer self.has_been_init_mutex.unlock();
-            self.has_been_init = false; // flipping flag back so that the struct can still exist but non-initialised
-        }
+        self.has_been_init_mutex.lock();
+        defer self.has_been_init_mutex.unlock();
+        self.has_been_init = false; // flipping flag back so that the struct can still exist but non-initialised
     }
 };
 
