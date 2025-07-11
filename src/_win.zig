@@ -40,22 +40,20 @@ const DEFAULT_WIN32_FLAGS: win32.FileNotifyChangeFilter = .{};
 ///
 /// PARAMS:
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
-pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
+pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG, alloc: std.mem.Allocator) !void {
     if (p_wd.has_been_init == true) return error.WATCHDOG_ALREADY_INIT;
     if (p_wd.platform_vars.opt_hm_handle_to_path != null) return error.PATH_TO_HANDLE_HASHMAP_ALREADY_INIT;
     if (p_wd.platform_vars.opt_hm_path_to_handle != null) return error.HANDLE_TO_PATH_HASHMAP_ALREADY_INIT;
 
     // init hashmap for storing watchdog ptrs
-    if (p_wd.alloc) |l_alloc| {
-        const path_to_handle_hm = std.StringHashMap(win32.HANDLE).init(l_alloc);
-        errdefer path_to_handle_hm.deinit();
-        const handle_to_path_hm = std.AutoHashMap(win32.HANDLE, []const u8).init(l_alloc);
-        errdefer handle_to_path_hm.deinit();
+    const path_to_handle_hm = std.StringHashMap(win32.HANDLE).init(alloc);
+    errdefer path_to_handle_hm.deinit();
+    const handle_to_path_hm = std.AutoHashMap(win32.HANDLE, []const u8).init(alloc);
+    errdefer handle_to_path_hm.deinit();
 
-        // if no errors have occurred --> set values now
-        p_wd.platform_vars.opt_hm_path_to_handle = path_to_handle_hm;
-        p_wd.platform_vars.opt_hm_handle_to_path = handle_to_path_hm;
-    }
+    // if no errors have occurred --> set values now
+    p_wd.platform_vars.opt_hm_path_to_handle = path_to_handle_hm;
+    p_wd.platform_vars.opt_hm_handle_to_path = handle_to_path_hm;
 }
 
 /// adds a directory path to the watchlist
@@ -66,29 +64,30 @@ pub fn watchdogInit(p_wd: *zga.ZGA_WATCHDOG) !void {
 pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, flags: u32) !void {
     _ = flags; // unused in Windows version
 
-    if (p_wd.alloc) |alloc| {
-        const path_as_lpcwstr: [:0]const u16 = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
-        defer alloc.free(path_as_lpcwstr);
+    // grabbing UTF-16 Le path for windows funcs using only stack allocations
+    var utf8_temp_buf: [std.fs.max_path_bytes]u16 = undefined; // stack-allocated buffer for temporary conversions (only need half of this size --> leaving incase I've missed something)
+    if (try std.unicode.checkUtf8ToUtf16LeOverflow(path, &utf8_temp_buf) == true) return error.UTF8_TEMP_BUF_WOULD_OVERFLOW; // avoid memory leak
+    const num_indexes_written_lpcwstr: usize = try std.unicode.utf8ToUtf16Le(&utf8_temp_buf, path);
+    const path_as_lpcwstr: [:0]const u16 = utf8_temp_buf[0..num_indexes_written_lpcwstr];
 
-        // only creating new handle if one doesn't already exist --> will only happen on first attempt
-        if (p_wd.platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
-            if (p_hm_path_to_handle.contains(path) == false) { // checking if hashmap value already exists
-                const file_handle: win32.HANDLE = win32.kernel32.CreateFileW(   path_as_lpcwstr, 
-                                                                                win32.FILE_LIST_DIRECTORY,
-                                                                                win32.FILE_SHARE_READ | win32.FILE_SHARE_WRITE | win32.FILE_SHARE_DELETE,
-                                                                                null,
-                                                                                win32.OPEN_EXISTING,
-                                                                                win32.FILE_FLAG_BACKUP_SEMANTICS,
-                                                                                null,
-                                                                            );
-                if (file_handle == win32.INVALID_HANDLE_VALUE) return error.FAILED_TO_OPEN_DIR_WIN32;
+    // only creating new handle if one doesn't already exist --> will only happen on first attempt
+    if (p_wd.platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
+        if (p_hm_path_to_handle.contains(path) == false) { // checking if hashmap value already exists
+            const file_handle: win32.HANDLE = win32.kernel32.CreateFileW(   path_as_lpcwstr, 
+                                                                            win32.FILE_LIST_DIRECTORY,
+                                                                            win32.FILE_SHARE_READ | win32.FILE_SHARE_WRITE | win32.FILE_SHARE_DELETE,
+                                                                            null,
+                                                                            win32.OPEN_EXISTING,
+                                                                            win32.FILE_FLAG_BACKUP_SEMANTICS,
+                                                                            null,
+                                                                        );
+            if (file_handle == win32.INVALID_HANDLE_VALUE) return error.FAILED_TO_OPEN_DIR_WIN32;
 
-                try p_hm_path_to_handle.put(path, file_handle);
-                if (p_wd.platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| try p_hm_handle_to_path.put(file_handle, path) else return error.HM_HANDLE_TO_PATH_NOT_INIT;
+            try p_hm_path_to_handle.put(path, file_handle);
+            if (p_wd.platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| try p_hm_handle_to_path.put(file_handle, path) else return error.HM_HANDLE_TO_PATH_NOT_INIT;
 
-            } else return error.ADDING_PATH_THAT_ALREADY_HAS_A_WATCHDOG;
-        } else return error.HM_PATH_TO_HANDLE_NOT_INIT;
-    } else return error.WATCHDOG_ALLOCATOR_NOT_DEFINED;
+        } else return error.ADDING_PATH_THAT_ALREADY_HAS_A_WATCHDOG;
+    } else return error.HM_PATH_TO_HANDLE_NOT_INIT;
 }
 
 /// Removes a previously added path from the watchlist.
@@ -98,14 +97,17 @@ pub fn watchdogAdd(p_wd: *zga.ZGA_WATCHDOG, path: []const u8, flags: u32) !void 
 pub fn watchdogRemove(p_wd: *zga.ZGA_WATCHDOG, path: []const u8) !void {
     // removing from handle --> path hashmap
     if (p_wd.platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
-        if (p_wd.platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
-        const handle_to_remove: win32.HANDLE = p_wd.platform_vars.opt_hm_path_to_handle.?.get(path) orelse return error.HM_DOES_NOT_CONTAIN_PATH;
+        if (p_wd.platform_vars.opt_hm_path_to_handle) |hm_path_to_handle| {
+            const handle_to_remove: win32.HANDLE = hm_path_to_handle.get(path) orelse return error.HM_DOES_NOT_CONTAIN_PATH;
 
         if (p_hm_handle_to_path.contains(handle_to_remove) == true) { // checking if hashmap value exists
             if (p_hm_handle_to_path.remove(handle_to_remove) == false) return error.FAILED_TO_REMOVE_HANDLE_FROM_HM; // remove value from hashmap
         } else return error.PATH_DNE_IN_HM;
 
-        win32.CloseHandle(handle_to_remove); // freeing memory associated with the handle
+        // freeing memory associated with the handle
+        win32.CloseHandle(handle_to_remove); 
+
+        } return error.HM_PATH_TO_HANDLE_NOT_INIT;
     } else return error.HM_PATH_TO_HANDLE_NOT_INIT;
 
     // removing from path --> handle hashmap
@@ -158,7 +160,8 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
                 const name_len_wchar: usize = info.FileNameLength / 2; // in WCHARs
 
                 // creating ZGA_EVENT obj from relevant vars
-                var curr_event: zga.ZGA_EVENT = .{ .zga_flags = zga_flags, };
+                var curr_event: zga.ZGA_EVENT = .{};
+                curr_event.zga_flags = zga_flags;
 
                 // conv UTF-16 filename slice to UTF-8 in a fixed buffer.
                 const name_slice: []const u16 = p_info_filename[0..name_len_wchar];
@@ -166,10 +169,7 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
                 curr_event.name = curr_event.name_buf[0..bytes_written]; // creating slice from num of bytes written to name buf
 
                 // pushing current event to the global queue
-                if (p_wd.event_queue) |*p_event_queue| {
-                    try p_event_queue.push(curr_event);
-
-                } else return error.EVENT_QUEUE_NOT_INIT;
+                try p_wd.event_queue.writeItem(curr_event);
 
                 // move to next event entry, or break if this is the last one
                 if (info.NextEntryOffset == 0) break;
@@ -184,9 +184,7 @@ pub fn watchdogRead(p_wd: *zga.ZGA_WATCHDOG, zga_flags: u32) !void {
 ///
 /// PARAMS:
 /// - `p_wd`: Pointer to the ZGA_WATCHDOG object.
-pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) !void {
-    if (p_wd.has_been_init != true) return error.WATCHDOG_NOT_INIT;
-
+pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) void {
     // iterate over each wd_desc and call watchdogRemove on it + destroy the hashmap after doing so
     if (p_wd.platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
         var hm_iterator = p_hm_path_to_handle.iterator();
@@ -198,12 +196,12 @@ pub fn watchdogDeinit(p_wd: *zga.ZGA_WATCHDOG) !void {
         // destroy the hashmap (path --> wd)
         p_hm_path_to_handle.deinit(); 
 
-    } else return error.PATH_TO_WATCHDOG_HASHMAP_NOT_INIT;
+    }
 
     // destroying data structures --> heap allocated
     if (p_wd.platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
         p_hm_handle_to_path.deinit(); // destroy the hashmap (wd --> path)
-    } else return error.WATCHDOG_TO_PATH_HASHMAP_NOT_INIT;
+    }
 
     // if no errors have occurred --> reset values now
     p_wd.platform_vars.opt_hm_path_to_handle = null;

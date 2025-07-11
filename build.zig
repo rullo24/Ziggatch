@@ -12,20 +12,12 @@ pub fn build(b: *std.Build) !void {
     const def_target = b.standardTargetOptions(.{});
     const def_optimise = b.standardOptimizeOption(.{});
 
-    // tying TSQ dependency to ZGA import in sub-projects
-    const TSQ_dependency = b.dependency("TSQ", .{
-        .target = def_target,
-        .optimize = def_optimise,
-    });
-    const TSQ_module = TSQ_dependency.module("TSQ"); // grabbing TSQ module from build.zig.zon TSQ project build.zig
-
     // creating base ZGA module
     const ZGA_module = b.addModule("ZGA", .{
         .root_source_file = b.path("./src/zga.zig"),
         .target = def_target,
         .optimize = def_optimise,
     });
-    ZGA_module.addImport("TSQ", TSQ_module);
 
     // ---------- Testing: Scan src/ directory for all .zig files and add test steps ----------
     // ---------- will run if `zig build test` is run from cmd                       ----------
@@ -34,13 +26,12 @@ pub fn build(b: *std.Build) !void {
 
     // zga.zig testing
     const zga_src_lazypath = b.path("./src/zga.zig");
-    var zga_test_step = b.addTest(.{
+    const zga_test_step = b.addTest(.{
         // .name = "ZGA_TEST",
         .root_source_file = zga_src_lazypath,
         .target = def_target,
         .optimize = def_optimise,
     });
-    zga_test_step.root_module.addImport("TSQ", TSQ_module);
     const run_zga_tests = b.addRunArtifact(zga_test_step);
     test_build_step.dependOn(&run_zga_tests.step); // adding test to fleet of tests
 
@@ -53,7 +44,6 @@ pub fn build(b: *std.Build) !void {
             .optimize = def_optimise,
         });
         inotify_test_step.root_module.addImport("ZGA", ZGA_module);
-        inotify_test_step.root_module.addImport("TSQ", TSQ_module);
         const run_inotify_tests = b.addRunArtifact(inotify_test_step);
         test_build_step.dependOn(&run_inotify_tests.step); // adding test to fleet of tests
     }
@@ -67,7 +57,6 @@ pub fn build(b: *std.Build) !void {
             .optimize = def_optimise,
         });
         win_test_step.root_module.addImport("ZGA", ZGA_module);
-        win_test_step.root_module.addImport("TSQ", TSQ_module);
         const run_win_tests = b.addRunArtifact(win_test_step);
         test_build_step.dependOn(&run_win_tests.step); // adding test to fleet of tests
     }

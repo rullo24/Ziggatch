@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const tsq = @import("TSQ");
 const _win = @import("_win.zig");
 const _inotify = @import("_inotify.zig");
 const zga_backend: type = selectBackend();
@@ -23,6 +22,13 @@ pub const ZGA_CREATE: comptime_int          = 1 << 3;
 pub const ZGA_DELETE: comptime_int          = 1 << 4;
 pub const ZGA_MOVED: comptime_int           = 1 << 5;
 
+/////////////////////////////////
+// LOCAL FILE GLOBAL VARIABLES //
+/////////////////////////////////
+
+var event_buf: [SIZE_EVENT_QUEUE]ZGA_EVENT = undefined;
+var error_buf: [SIZE_ERROR_QUEUE]anyerror = undefined;
+
 ////////////////////////////////
 // PUBLIC STRUCT DECLARATIONS //
 ////////////////////////////////
@@ -37,20 +43,17 @@ pub const ZGA_EVENT = struct {
 // object used for concurrently capturing file changes
 pub const ZGA_WATCHDOG: type = struct {
     has_been_init: bool = false,
-    alloc: ?std.mem.Allocator = null,
     platform_vars: selectPlatformVars() = selectPlatformVars(){},
-    event_queue: ?tsq.createTSQ(ZGA_EVENT) = null,
-    error_queue: ?tsq.createTSQ(anyerror) = null,
+    event_queue: std.fifo.LinearFifo(ZGA_EVENT, .Slice) = undefined,
+    error_queue: std.fifo.LinearFifo(anyerror, .Slice) = undefined,
 
     // defining mutex vars for thread-safe execution
     has_been_init_mutex: std.Thread.Mutex = std.Thread.Mutex{},
-    alloc_mutex: std.Thread.Mutex = std.Thread.Mutex{},
     platform_vars_mutex: std.Thread.Mutex = std.Thread.Mutex{},
     event_queue_mutex: std.Thread.Mutex = std.Thread.Mutex{},
     error_queue_mutex: std.Thread.Mutex = std.Thread.Mutex{},
 
-    /// inits the ZGA_WATCHDOG object and allocates resources.
-    /// must be called before using other watchdog functions.
+    /// Inits the ZGA_WATCHDOG object and allocates resources. Must be called before using other watchdog functions.
     ///
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
@@ -60,32 +63,26 @@ pub const ZGA_WATCHDOG: type = struct {
         defer self.has_been_init_mutex.unlock();
         if (self.has_been_init == true) return error.ZGA_WATCHDOG_OBJ_ALREADY_INITIALISED;
 
-        self.alloc_mutex.lock();
-        defer self.alloc_mutex.unlock();
-        self.alloc = alloc; // for freeing memory later
-
-        if (self.alloc) |l_alloc| {
+        {
             self.event_queue_mutex.lock();
             defer self.event_queue_mutex.unlock();
+            self.event_queue = std.fifo.LinearFifo(ZGA_EVENT, .Slice).init(&event_buf); // init the LinearFIFO 
+        }
 
-            self.event_queue = try tsq.createTSQ(ZGA_EVENT).init(l_alloc, SIZE_EVENT_QUEUE);
-            errdefer self.event_queue.?.deinit() catch {};
-
+        {
             self.error_queue_mutex.lock();
             defer self.error_queue_mutex.unlock();
-            self.error_queue = try tsq.createTSQ(anyerror).init(l_alloc, SIZE_ERROR_QUEUE);
-            errdefer self.error_queue.?.deinit() catch {};
-        } else return error.INVALID_ALLOCATOR;
+            self.error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(&error_buf); // init the LinearFIFO 
+        }
         
         // initialise O/S-specific vars and buffers
         if (std.meta.hasFn(zga_backend, "watchdogInit")) { // check if func available on target o/s
-            try zga_backend.watchdogInit(self); 
-        } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
-        
+            try zga_backend.watchdogInit(self, alloc); 
+        } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND; 
         self.has_been_init = true; // flag so that other methods cannot be run before initialisation
     }
 
-    /// adds a path (file or directory) to the watchlist with specified event flags.
+    /// Adds a path (file or directory) to the watchlist with specified event flags.
     ///
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
@@ -102,7 +99,7 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
-    /// removes a path from the watchlist.
+    /// Removes a path from the watchlist.
     ///
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
@@ -118,7 +115,7 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.ADD_FUNC_DNE_IN_ZGA_BACKEND;
     }
 
-    /// reads file change events and pushes them to the event queue.
+    /// Reads file change events and pushes them to the event queue. This must be run continuously to scan for updates.
     ///
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
@@ -139,65 +136,58 @@ pub const ZGA_WATCHDOG: type = struct {
             };
     }
 
-    /// pops a single event from the event queue.
-    /// if the queue is empty, this function blocks until a pop value is available
+    /// Pops a single event from the event queue. Returns null if there aren't any available queue values
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
     pub fn popSingleEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
         self.event_queue_mutex.lock();
         defer self.event_queue_mutex.unlock();
 
-        if (self.event_queue) |*p_event_queue| {
-            const pop_event: ZGA_EVENT = try p_event_queue.pop();
-            return pop_event;
-        } else return error.EVENT_QUEUE_NULL;
+        // capturing 1x ZGA_EVENT item from the queue
+        return self.event_queue.readItem() orelse error.EVENT_QUEUE_EMPTY;
     }
 
-    pub fn popAllEventsAlloc(self: *ZGA_WATCHDOG) ![]ZGA_EVENT {
-        self.event_queue_mutex.lock();
-        defer self.event_queue_mutex.unlock();
+    // pub fn popAllEventsAlloc(self: *ZGA_WATCHDOG) ![]ZGA_EVENT {
+    //     self.event_queue_mutex.lock();
+    //     defer self.event_queue_mutex.unlock();
 
-        // checking if event queue is available for use
-        if (self.event_queue) |*p_event_queue| {
+    //     // checking if event queue is available for use
+    //     if (self.event_queue) |*p_event_queue| {
 
-            // pop each item and store in Arraylist
+    //         // pop each item and store in Arraylist
 
-            // return arraylist at end
+    //         // return arraylist at end
 
-        } else return error.EVENT_QUEUE_NULL;
-    }
+    //     } else return error.EVENT_QUEUE_NULL;
+    // }
 
-    pub fn cleanAndProcessEvents(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) !void {
-        self.event_queue_mutex.lock();
-        defer self.event_queue_mutex.unlock();
+    // pub fn cleanAndProcessEvents(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) !void {
+    //     self.event_queue_mutex.lock();
+    //     defer self.event_queue_mutex.unlock();
 
-        // checking if event queue is available for use
-        if (self.event_queue) |*p_event_queue| {
+    //     // checking if event queue is available for use
+    //     if (self.event_queue) |*p_event_queue| {
 
-            // iterate over each item in queue (available)
+    //         // iterate over each item in queue (available)
 
-            // for each item, run the function callback, taking the event as argument
+    //         // for each item, run the function callback, taking the event as argument
 
-        } else return error.EVENT_QUEUE_NULL;
+    //     } else return error.EVENT_QUEUE_NULL;
 
-    }
+    // }
 
-    /// pops a single event from the error queue.
-    /// if the queue is empty, this function blocks until a pop value is available
+    /// Pops a single event from the error queue. Returns null if there aren't any available queue values
+    /// 
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
     pub fn popSingleError(self: *ZGA_WATCHDOG) !anyerror {
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
 
-        if (self.error_queue) |*p_err_queue| {
-            const pop_err: ZGA_EVENT = try p_err_queue.pop();
-            return pop_err;
-        } else return error.ERROR_QUEUE_NULL;
+        return self.error_queue.readItem() orelse error.ERROR_QUEUE_EMPTY;
     }
 
-    /// returns an allocated list (as a slice) of all currently watched paths.
-    /// slice of paths must be freed by the caller.
+    /// Returns an allocated list (as a slice) of all currently watched paths. Slice of paths must be freed by the caller.
     ///
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
@@ -237,47 +227,41 @@ pub const ZGA_WATCHDOG: type = struct {
         return wd_watchlist.toOwnedSlice(); // to be free'd externally
     }
 
-    /// cleans up all watchdog resources, freeing internal allocations.
-    /// after this call, the object must be re-initialised before reuse.
+    /// Cleans up all watchdog resources, freeing internal allocations. After this call, the object must be re-initialised before reuse.
+    /// 
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
-    pub fn close(self: *ZGA_WATCHDOG) !void {
-        self.has_been_init_mutex.lock();
-        defer self.has_been_init_mutex.unlock();
-        self.platform_vars_mutex.lock();
-        defer self.platform_vars_mutex.unlock();
-        self.alloc_mutex.lock();
-        defer self.alloc_mutex.unlock();
-        self.event_queue_mutex.lock();
-        defer self.event_queue_mutex.unlock();
-        self.error_queue_mutex.lock();
-        defer self.error_queue_mutex.unlock();
+    pub fn deinit(self: *ZGA_WATCHDOG) void {
+        // deinit the objs associated inside of the O/S-specific files
+        {
+            self.platform_vars_mutex.lock();
+            defer self.platform_vars_mutex.unlock();
 
-        if (self.has_been_init == false) return error.ZGA_WATCHDOG_OBJ_NOT_INITIALISED;
-        if (std.meta.hasFn(zga_backend, "watchdogDeinit")) { // check if func available on target o/s
-            try zga_backend.watchdogDeinit(self);
+            if (std.meta.hasFn(zga_backend, "watchdogDeinit")) { // check if func available on target o/s
+                zga_backend.watchdogDeinit(self);
+            }
         }
 
-        if (self.event_queue) |*p_event_queue| {
-            // cleaning queue --> freeing all allocated heap memory
-            while (try p_event_queue.getSize() > 0) { 
-                const curr_event: ZGA_EVENT = p_event_queue.pop() catch break;
-                if (self.alloc) |l_alloc| {
-                    l_alloc.free(curr_event.name);
-                } else return error.INVALID_ALLOCATOR;
-            } 
+        // iterating over event queue --> cleaning and clearing
+        {
+            self.event_queue_mutex.lock();
+            defer self.event_queue_mutex.unlock();
+            self.event_queue.deinit(); // only does anything if set to .Dynamic mode --> leave here for readability
+        }
 
-            try p_event_queue.deinit(); // freeing memory for thread-safe queue
-            self.event_queue = null; // avoid dangling ptrs
-        } else return error.NO_EVENT_QUEUE_ON_CLOSE;
+        // iterating over error queue --> cleaning and clearing
+        {
+            self.error_queue_mutex.lock();
+            defer self.error_queue_mutex.unlock();
+            self.error_queue.deinit(); // only does anything if set to .Dynamic mode --> leave here for readability
+        }
 
-        if (self.error_queue) |*p_err_queue| {
-            try p_err_queue.deinit(); // freeing memory for thread-safe queue
-            self.error_queue = null; // avoid dangling ptrs
-        } else return error.NO_ERROR_QUEUE_ON_CLOSE;
-
-        self.alloc = null; // deinit allocator
-        self.has_been_init = false; // flipping flag back so that the struct can still exist but non-initialised
+        // restating the object as uninitialised
+        {
+            self.has_been_init_mutex.lock();
+            defer self.has_been_init_mutex.unlock();
+            self.has_been_init = false; // flipping flag back so that the struct can still exist but non-initialised
+        }
     }
 };
 
