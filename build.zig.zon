@@ -37,8 +37,8 @@
     // internet connectivity.
     .dependencies = .{
         .TSQ = .{
-            .url = "https://github.com/rullo24/TSQ/archive/refs/tags/v1.0.1.tar.gz",
-            .hash = "TSQ-1.0.1-uWdgbF8lAACzoHKFCZqVy5KPop-xsTJCSnV8Sr7oleqS",
+            .url = "https://github.com/rullo24/TSQ/archive/refs/tags/v1.1.0.tar.gz",
+            .hash = "TSQ-1.1.0-uWdgbHgtAAAvCK0MiIxFEud_R_Y-jUlUCaWoPQfzfxOE",
         },
     },
     .paths = .{

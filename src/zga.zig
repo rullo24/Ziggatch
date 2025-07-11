@@ -153,6 +153,35 @@ pub const ZGA_WATCHDOG: type = struct {
         } else return error.EVENT_QUEUE_NULL;
     }
 
+    pub fn popAllEventsAlloc(self: *ZGA_WATCHDOG) ![]ZGA_EVENT {
+        self.event_queue_mutex.lock();
+        defer self.event_queue_mutex.unlock();
+
+        // checking if event queue is available for use
+        if (self.event_queue) |*p_event_queue| {
+
+            // pop each item and store in Arraylist
+
+            // return arraylist at end
+
+        } else return error.EVENT_QUEUE_NULL;
+    }
+
+    pub fn cleanAndProcessEvents(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) !void {
+        self.event_queue_mutex.lock();
+        defer self.event_queue_mutex.unlock();
+
+        // checking if event queue is available for use
+        if (self.event_queue) |*p_event_queue| {
+
+            // iterate over each item in queue (available)
+
+            // for each item, run the function callback, taking the event as argument
+
+        } else return error.EVENT_QUEUE_NULL;
+
+    }
+
     /// pops a single event from the error queue.
     /// if the queue is empty, this function blocks until a pop value is available
     /// PARAMS:
