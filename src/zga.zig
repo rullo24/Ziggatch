@@ -139,52 +139,108 @@ pub const ZGA_WATCHDOG: type = struct {
     /// Pops a single event from the event queue. Returns null if there aren't any available queue values
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
-    pub fn popSingleEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
+    pub fn popEvent(self: *ZGA_WATCHDOG) !ZGA_EVENT {
         self.event_queue_mutex.lock();
         defer self.event_queue_mutex.unlock();
 
         // capturing 1x ZGA_EVENT item from the queue
-        return self.event_queue.readItem() orelse error.EVENT_QUEUE_EMPTY;
+        return self.event_queue.readItem() orelse error.EMPTY_EVENT_QUEUE;
     }
 
-    // pub fn popAllEventsAlloc(self: *ZGA_WATCHDOG) ![]ZGA_EVENT {
-    //     self.event_queue_mutex.lock();
-    //     defer self.event_queue_mutex.unlock();
+    /// Pops all available events from the event queue and returns them as an allocated slice (user to dealloc external slice).
+    /// 
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
+    /// - `alloc`: Allocator used to allocate the output slice.
+    pub fn drainEventsAlloc(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) ![]ZGA_EVENT {
+        self.event_queue_mutex.lock();
+        defer self.event_queue_mutex.unlock();
 
-    //     // checking if event queue is available for use
-    //     if (self.event_queue) |*p_event_queue| {
+        // checking if events queue is empty --> return error
+        if (self.event_queue.readableLength() == 0) return error.EMPTY_EVENT_QUEUE;
 
-    //         // pop each item and store in Arraylist
+        // init ArrayList to store the events --> to be dealloc'd externally
+        var l_arrlist = std.ArrayList(ZGA_EVENT).init(alloc);
 
-    //         // return arraylist at end
+        // cycle over each item in the events queue --> popping each
+        while (self.event_queue.readItem()) |curr_item| {
+            l_arrlist.append(curr_item); // pop each item and store in Arraylist
+        }
 
-    //     } else return error.EVENT_QUEUE_NULL;
-    // }
+        return l_arrlist.toOwnedSlice(); // to be dealloc'd externally
+    }
 
-    // pub fn cleanAndProcessEvents(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) !void {
-    //     self.event_queue_mutex.lock();
-    //     defer self.event_queue_mutex.unlock();
+    /// Processes and removes all available events from the event queue using a user-provided function pointer.
+    ///
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
+    /// - `p_func`: Function pointer to a callback that processes each event. Must accept a `*ZGA_EVENT` and a user-provided argument.
+    /// - `p_args`: Opaque pointer passed to `p_func` along with each event.
+    pub fn processAndClearEvents(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) void {
+        self.event_queue_mutex.lock();
+        defer self.event_queue_mutex.unlock();
 
-    //     // checking if event queue is available for use
-    //     if (self.event_queue) |*p_event_queue| {
+        // checking if events queue is empty --> return error
+        if (self.event_queue.readableLength() == 0) return error.EMPTY_EVENT_QUEUE;
 
-    //         // iterate over each item in queue (available)
-
-    //         // for each item, run the function callback, taking the event as argument
-
-    //     } else return error.EVENT_QUEUE_NULL;
-
-    // }
+        // cycle over each item in the events queue --> popping each
+        while (self.event_queue.readItem()) |*p_curr_item| {
+            p_func(p_curr_item, p_args); // call user callback with current event and user-parsed args
+        }
+    }
 
     /// Pops a single event from the error queue. Returns null if there aren't any available queue values
     /// 
     /// PARAMS:
     /// - `self`: The acting watchdog instance.
-    pub fn popSingleError(self: *ZGA_WATCHDOG) !anyerror {
+    pub fn popError(self: *ZGA_WATCHDOG) !anyerror {
         self.error_queue_mutex.lock();
         defer self.error_queue_mutex.unlock();
 
         return self.error_queue.readItem() orelse error.ERROR_QUEUE_EMPTY;
+    }
+
+    /// Pops all available errors from the error queue and returns them as an allocated slice.
+    /// 
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
+    /// - `alloc`: Allocator used to allocate the output slice.
+    pub fn drainErrorsAlloc(self: *ZGA_WATCHDOG, alloc: std.mem.Allocator) ![]anyerror {
+        self.error_queue_mutex.lock();
+        defer self.error_queue_mutex.unlock();
+
+        // checking if error queue is empty --> return error
+        if (self.error_queue.readableLength() == 0) return error.EMPTY_ERROR_QUEUE;
+
+        // init ArrayList to store the errors --> to be dealloc'd externally
+        var l_arrlist = std.ArrayList(anyerror).init(alloc);
+
+        // cycle over each item in the error queue --> popping each
+        while (self.error_queue.readItem()) |curr_item| {
+            l_arrlist.append(curr_item); // pop each item and store in Arraylist
+        }
+
+        return l_arrlist.toOwnedSlice(); // to be dealloc'd externally
+    }
+
+    
+    /// Processes and removes all errors from the error queue using a user-provided function.
+    /// 
+    /// PARAMS:
+    /// - `self`: The acting watchdog instance.
+    /// - `p_func`: Callback function applied to each error. Must accept a `*anyerror` and a user-provided argument.
+    /// - `p_args`: Opaque pointer passed to `p_func` along with each error.
+    pub fn processAndClearErrors(self: *ZGA_WATCHDOG, p_func: *const fn (*anyopaque) void, p_args: *const anyopaque) void { 
+        self.error_queue_mutex.lock();
+        defer self.error_queue_mutex.unlock();
+
+        // checking if error queue is empty --> return error
+        if (self.error_queue.readableLength() == 0) return error.EMPTY_ERROR_QUEUE;
+
+        // cycle over each item in the error queue --> popping each
+        while (self.error_queue.readItem()) |*p_curr_item| {
+            p_func(p_curr_item, p_args); // call user callback with current event and user-parsed args
+        }
     }
 
     /// Returns an allocated list (as a slice) of all currently watched paths. Slice of paths must be freed by the caller.
