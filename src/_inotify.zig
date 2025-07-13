@@ -172,7 +172,14 @@ pub fn watchdogRead(p_platform_vars: *INOTIFY_VARS, zga_flags: u32, p_event_queu
     // iterating over all values in read buffer --> checking maps
     var i: usize = 0;
     while (i < len_read) { // iterating over all read inotify responses
-        const p_curr_event: *linux.inotify_event = @alignCast(@ptrCast(buf[i..].ptr)); // cast bytes to aligned inotify_event ptr
+        const p_raw_buf: [*]u8 = buf[i..].ptr;
+
+        // checking alignment --> must be valid for safe operation
+        const alignment = @alignOf(linux.inotify_event);
+        if (@intFromPtr(p_raw_buf) % alignment != 0) return error.INVALID_ALIGNMENT;
+
+        // processing event from buffer
+        const p_curr_event: *linux.inotify_event = @alignCast(@ptrCast(p_raw_buf)); // cast bytes to aligned inotify_event ptr
 
         if ((p_curr_event.mask & IN_Q_OVERFLOW) != 0) { // occurs if the provided buffer is too small for the num of events or removed inotify event comes through
             try p_error_queue.writeItem(error.EVENT_READ_OVERFLOWED_SOME_EVENTS_LOST); // writing to err queue
@@ -753,29 +760,87 @@ test "watchdogRead: Successfully reads and processes events" {
 }
 
 test "watchdogRead: Successfully reads and processes multiple of the same events after deactivation and reactivation" {
-    // Setup and initialize watchdog with real or mock fd
+    // Setup and init watchdog
+    const alloc = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    defer wd.deinit();
+    try watchdogInit(&wd.platform_vars, alloc);
 
-    // Add watch to trigger events
+    for (0..5) |_| {
+        // Add watch to trigger events (create and delete)
+        try watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_DELETE | zga.ZGA_CREATE);
 
-    // Trigger each filesystem event
+        // creating buffers for valid watchdogRead
+        var event_buf: [zga.SIZE_EVENT_QUEUE]zga.ZGA_EVENT = undefined;
+        var error_buf: [zga.SIZE_ERROR_QUEUE]anyerror = undefined;
+        var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(&event_buf); // init the LinearFIFO 
+        var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(&error_buf); // init the LinearFIFO 
 
-    // Call watchdogRead to process events
+        // Create file and then delete it in "./test" directory --> should be seen and captured by watcher
+        var cwd: std.fs.Dir = std.fs.cwd();
+        const p_file = try cwd.createFile("./test/wd_read_test_file_987654321.txt", .{});
+        defer p_file.close();
+        try cwd.deleteFile("./test/wd_read_test_file_987654321.txt");
 
-    // Verify event queue contains expected events
-}
+        // Call watchdogRead to process events
+        try watchdogRead(&wd.platform_vars, zga.ZGA_DELETE | zga.ZGA_CREATE, &event_queue, &error_queue);
 
-test "watchdogRead: Adds EVENT_READ_OVERFLOWED_SOME_EVENTS_LOST on IN_Q_OVERFLOW" {
-    // Setup watchdog with events including IN_Q_OVERFLOW
+        // pull events from the queue --> checking that they exist
+        const create_event = event_queue.readItem();
+        try std.testing.expect(create_event != null);
+        const delete_event = event_queue.readItem();
+        try std.testing.expect(delete_event != null);
 
-    // Call watchdogRead
+        // verify that create_event acts as expected
+        try std.testing.expect(create_event.?.zga_flags == zga.ZGA_CREATE);
+        try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "./test/wd_read_test_file_987654321.txt");
 
-    // Assert error event added to queue
+        // verify that delete_event acts as expected
+        try std.testing.expect(delete_event.?.zga_flags == zga.ZGA_DELETE);
+        try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "./test/wd_read_test_file_987654321.txt");   
+
+        // Remove watchdog directory for next runthrough
+        try watchdogRemove(&wd.platform_vars, "./test");
+    }
 }
 
 test "watchdogRead: Ignores IN_IGNORED events" {
     // Setup watchdog with IN_IGNORED events
+    const alloc = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    defer wd.deinit();
+    try watchdogInit(&wd.platform_vars, alloc);
+
+    // Add watch to trigger events (create and delete)
+    try watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_DELETE | zga.ZGA_CREATE);
+
+    // creating buffers for valid watchdogRead
+    var event_buf: [zga.SIZE_EVENT_QUEUE]zga.ZGA_EVENT = undefined;
+    var error_buf: [zga.SIZE_ERROR_QUEUE]anyerror = undefined;
+    var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(&event_buf); // init the LinearFIFO 
+    var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(&error_buf); // init the LinearFIFO 
+
+    // Create file and then delete it in "./test" directory --> should be seen and captured by watcher
+    for (0..10) |_| {
+        var cwd: std.fs.Dir = std.fs.cwd();
+        const p_file = try cwd.createFile("./test/wd_read_test_file_987654321.txt", .{});
+        defer p_file.close();
+        try cwd.deleteFile("./test/wd_read_test_file_987654321.txt");
+    }
+    try watchdogRemove(&wd.platform_vars, "./test");
+
+    
+
+
+    // this is throwing an error for some reason
+
+
+
+
+
 
     // Call watchdogRead
+    try watchdogRead(&wd.platform_vars, zga.ZGA_DELETE | zga.ZGA_CREATE, &event_queue, &error_queue);
 
     // Assert no events added for ignored masks
 }
@@ -795,6 +860,18 @@ test "watchdogRead: Returns error if wd_to_path hashmap is null during event pro
     // Simulate event without filename
 
     // Call watchdogRead, expect error.HM_WD_TO_PATH_NOT_INIT
+}
+
+test "watchdogRead: Each watch type returns mask as expected." {
+    
+
+
+
+
+
+
+
+
 }
 
 // watchdogList //

@@ -9,7 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const _win = @import("_win.zig");
-const _inotify = @import("_inotify.zig");
+pub const _inotify = @import("_inotify.zig");
 const zga_backend: type = selectBackend();
 
 ///////////////////////////////
