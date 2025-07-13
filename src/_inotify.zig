@@ -156,6 +156,10 @@ pub fn watchdogRead(p_platform_vars: *INOTIFY_VARS, zga_flags: u32, p_event_queu
     if (p_platform_vars.opt_hm_path_to_wd == null) return error.HM_PATH_TO_WD_NOT_INIT;
     if (p_platform_vars.opt_hm_wd_to_path == null) return error.HM_WD_TO_PATH_NOT_INIT;
 
+    // checking validity of queues
+    if (p_event_queue.buf.len == 0) return error.EVENT_QUEUE_NOT_INIT;
+    if (p_error_queue.buf.len == 0) return error.ERROR_QUEUE_NOT_INIT;
+
     // NOTE: flags don't require checking as they are not used in Linux _inotify watchdogRead()
 
     // buf to hold read events (read will return all events since last call)
@@ -217,7 +221,7 @@ pub fn watchdogRead(p_platform_vars: *INOTIFY_VARS, zga_flags: u32, p_event_queu
         }
 
         // incrementing ptr to next event
-        i += @sizeOf(linux.inotify_event) + p_curr_event.*.len; 
+        i += @sizeOf(linux.inotify_event) + p_curr_event.len; 
     }
 }
 
@@ -718,6 +722,12 @@ test "watchdogRead: Successfully reads and processes events" {
     // Add watch to trigger events (create and delete)
     try watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_DELETE | zga.ZGA_CREATE);
 
+    // creating buffers for valid watchdogRead
+    var event_buf: [zga.SIZE_EVENT_QUEUE]zga.ZGA_EVENT = undefined;
+    var error_buf: [zga.SIZE_ERROR_QUEUE]anyerror = undefined;
+    var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(&event_buf); // init the LinearFIFO 
+    var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(&error_buf); // init the LinearFIFO 
+
     // Create file and then delete it in "./test" directory --> should be seen and captured by watcher
     var cwd: std.fs.Dir = std.fs.cwd();
     const p_file = try cwd.createFile("./test/wd_read_test_file_987654321.txt", .{});
@@ -725,21 +735,21 @@ test "watchdogRead: Successfully reads and processes events" {
     try cwd.deleteFile("./test/wd_read_test_file_987654321.txt");
 
     // Call watchdogRead to process events
-    try watchdogRead(&wd.platform_vars, zga.ZGA_DELETE | zga.ZGA_CREATE, &wd.event_queue, &wd.error_queue);
+    try watchdogRead(&wd.platform_vars, zga.ZGA_DELETE | zga.ZGA_CREATE, &event_queue, &error_queue);
 
     // pull events from the queue --> checking that they exist
-    // const create_event = wd.event_queue.readItem();
-    // try std.testing.expect(create_event != null);
-    // const delete_event = wd.event_queue.readItem();
-    // try std.testing.expect(delete_event != null);
+    const create_event = event_queue.readItem();
+    try std.testing.expect(create_event != null);
+    const delete_event = event_queue.readItem();
+    try std.testing.expect(delete_event != null);
 
     // verify that create_event acts as expected
-    // try std.testing.expect(create_event.?.zga_flags == zga.ZGA_CREATE);
-    // try std.testing.expectEqualStrings(create_event.?.name, "./test/wd_read_test_file_987654321.txt");
+    try std.testing.expect(create_event.?.zga_flags == zga.ZGA_CREATE);
+    try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "./test/wd_read_test_file_987654321.txt");
 
     // verify that delete_event acts as expected
-    // try std.testing.expect(delete_event.?.zga_flags == zga.ZGA_DELETE);
-    // try std.testing.expectEqualStrings(create_event.?.name, "./test/wd_read_test_file_987654321.txt");
+    try std.testing.expect(delete_event.?.zga_flags == zga.ZGA_DELETE);
+    try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "./test/wd_read_test_file_987654321.txt");
 }
 
 test "watchdogRead: Successfully reads and processes multiple of the same events after deactivation and reactivation" {
