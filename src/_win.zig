@@ -46,8 +46,8 @@ const DEFAULT_WIN32_FLAGS: win32.FileNotifyChangeFilter = .{};
 /// - `p_platform_vars`: Pointer to the WIN32_VARS object used for storing variables relevant to inotify
 /// - `alloc`: Allocator for internal values.
 pub fn watchdogInit(p_platform_vars: *WIN32_VARS, alloc: std.mem.Allocator) !void {
-    if (p_platform_vars.opt_hm_handle_to_path != null) return error.PATH_TO_HANDLE_HASHMAP_ALREADY_INIT;
-    if (p_platform_vars.opt_hm_path_to_handle != null) return error.HANDLE_TO_PATH_HASHMAP_ALREADY_INIT;
+    if (p_platform_vars.opt_hm_handle_to_path != null) return error.HM_HANDLE_TO_PATH_INIT_ALREADY;
+    if (p_platform_vars.opt_hm_path_to_handle != null) return error.HM_PATH_TO_HANDLE_INIT_ALREADY;
 
     // init hashmap for storing watchdog ptrs
     const path_to_handle_hm = std.StringHashMap(win32.HANDLE).init(alloc);
@@ -67,6 +67,9 @@ pub fn watchdogInit(p_platform_vars: *WIN32_VARS, alloc: std.mem.Allocator) !voi
 /// - `path`: UTF-8 path to the directory to watch.
 /// - `flags`: Bitmask of ZGA flags indicating which changes to monitor.
 pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !void {
+    if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
+    if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
+
     _ = flags; // unused in Windows version
 
     // grabbing UTF-16 Le path for windows funcs using only stack allocations
@@ -107,6 +110,9 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
 /// - `p_platform_vars`: Pointer to the WIN32_VARS object used for storing variables relevant to inotify
 /// - `path`: UTF-8 path to remove from watching.
 pub fn watchdogRemove(p_platform_vars: *WIN32_VARS, path: []const u8) !void {
+    if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
+    if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
+
     // removing from handle --> path hashmap
     if (p_platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
 
@@ -143,6 +149,8 @@ pub fn watchdogRemove(p_platform_vars: *WIN32_VARS, path: []const u8) !void {
 /// - `p_event_queue`: Pointer to the event queue used for storing file events from the watchdog
 /// - `p_error_queue`: Pointer to the error queue used for storing error events from the watchdog
 pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue: *std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice), p_error_queue: *std.fifo.LinearFifo(anyerror, .Slice)) !void {
+    if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
+    if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
     _ = p_error_queue; // unused in windows version   
 
     // buf to hold handle event info
@@ -188,7 +196,7 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
                 // conv UTF-16 filename slice to UTF-8 in a fixed buffer.
                 const name_slice: []const u16 = p_info_filename[0..name_len_wchar];
                 const bytes_written: usize = try std.unicode.utf16LeToUtf8(&curr_event.name_buf, name_slice); // writing to obj for queue
-                curr_event.name = curr_event.name_buf[0..bytes_written]; // creating slice from num of bytes written to name buf
+                curr_event.name_len = bytes_written;
 
                 // pushing current event to the global queue
                 try p_event_queue.writeItem(curr_event);
@@ -207,6 +215,9 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
 /// - `p_platform_vars`: Pointer to the INOTIFY_VARS object used for storing variables relevant to inotify
 /// - `alloc`: Allocator for internal values.
 pub fn watchdogList(p_platform_vars: *WIN32_VARS, alloc: std.mem.Allocator) ![]const []const u8 {
+    if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
+    if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
+
     var wd_watchlist = std.ArrayList([]const u8).init(alloc);
 
     if (p_platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
@@ -216,6 +227,8 @@ pub fn watchdogList(p_platform_vars: *WIN32_VARS, alloc: std.mem.Allocator) ![]c
             try wd_watchlist.append(curr_hm_val_str);
         }
     } else return error.HM_PATH_TO_HANDLE_NOT_INIT;
+
+    return wd_watchlist;
 }
 
 /// cleans up all Windows-specific watchdog resources and internal structures.

@@ -40,7 +40,7 @@ var error_buf: [SIZE_ERROR_QUEUE]anyerror = undefined;
 // represents a change to filesystem
 pub const ZGA_EVENT = struct {
     name_buf: [std.fs.max_path_bytes]u8 = undefined, // holds the path
-    name: []const u8 = "",
+    name_len: usize = 0, // holds the valid byte len of name_buf
     zga_flags: u32 = 0x0,
 };
 
