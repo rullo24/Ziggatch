@@ -730,10 +730,12 @@ test "watchdogRead: Successfully reads and processes events" {
     try watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_DELETE | zga.ZGA_CREATE);
 
     // creating buffers for valid watchdogRead
-    var event_buf: [zga.SIZE_EVENT_QUEUE]zga.ZGA_EVENT = undefined;
-    var error_buf: [zga.SIZE_ERROR_QUEUE]anyerror = undefined;
-    var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(&event_buf); // init the LinearFIFO 
-    var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(&error_buf); // init the LinearFIFO 
+    const event_buf: []zga.ZGA_EVENT = try alloc.alloc(zga.ZGA_EVENT, zga.SIZE_EVENT_QUEUE);
+    defer alloc.free(event_buf);
+    const error_buf: []anyerror = try alloc.alloc(anyerror, zga.SIZE_ERROR_QUEUE);
+    defer alloc.free(error_buf);
+    var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(event_buf); // init the LinearFIFO 
+    var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(error_buf); // init the LinearFIFO 
 
     // Create file and then delete it in "./test" directory --> should be seen and captured by watcher
     var cwd: std.fs.Dir = std.fs.cwd();
@@ -771,10 +773,12 @@ test "watchdogRead: Successfully reads and processes multiple of the same events
         try watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_DELETE | zga.ZGA_CREATE);
 
         // creating buffers for valid watchdogRead
-        var event_buf: [zga.SIZE_EVENT_QUEUE]zga.ZGA_EVENT = undefined;
-        var error_buf: [zga.SIZE_ERROR_QUEUE]anyerror = undefined;
-        var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(&event_buf); // init the LinearFIFO 
-        var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(&error_buf); // init the LinearFIFO 
+        const event_buf: []zga.ZGA_EVENT = try alloc.alloc(zga.ZGA_EVENT, zga.SIZE_EVENT_QUEUE);
+        defer alloc.free(event_buf);
+        const error_buf: []anyerror = try alloc.alloc(anyerror, zga.SIZE_ERROR_QUEUE);
+        defer alloc.free(error_buf);
+        var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(event_buf); // init the LinearFIFO 
+        var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(error_buf); // init the LinearFIFO 
 
         // Create file and then delete it in "./test" directory --> should be seen and captured by watcher
         var cwd: std.fs.Dir = std.fs.cwd();
@@ -815,10 +819,12 @@ test "watchdogRead: Ignores IN_IGNORED events" {
     try watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_DELETE | zga.ZGA_CREATE);
 
     // creating buffers for valid watchdogRead
-    var event_buf: [zga.SIZE_EVENT_QUEUE]zga.ZGA_EVENT = undefined;
-    var error_buf: [zga.SIZE_ERROR_QUEUE]anyerror = undefined;
-    var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(&event_buf); // init the LinearFIFO 
-    var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(&error_buf); // init the LinearFIFO 
+    const event_buf: []zga.ZGA_EVENT = try alloc.alloc(zga.ZGA_EVENT, zga.SIZE_EVENT_QUEUE);
+    defer alloc.free(event_buf);
+    const error_buf: []anyerror = try alloc.alloc(anyerror, zga.SIZE_ERROR_QUEUE);
+    defer alloc.free(error_buf);
+    var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(event_buf); // init the LinearFIFO 
+    var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(error_buf); // init the LinearFIFO 
 
     // Create file and then delete it in "./test" directory --> should be seen and captured by watcher
     for (0..10) |_| {

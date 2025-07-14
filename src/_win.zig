@@ -9,12 +9,14 @@
 const std = @import("std");
 const win32 = std.os.windows;
 const zga = @import("zga.zig");
+const builtin = @import("builtin");
 
 ///////////////////////////////
 // MAGIC NUMBER DECLARATIONS //
 ///////////////////////////////
 
-const MAX_NUM_EVENTS_PER_READ: comptime_int = 1024;
+const MAX_NUM_EVENTS_PER_READ: comptime_int = 512;
+const WIN32_READ_BUF_LEN = MAX_NUM_EVENTS_PER_READ * @sizeOf(win32.FILE_NOTIFY_INFORMATION);
 
 const FILE_NOTIFY_CHANGE_FILE_NAME: comptime_int = 0x00000001; // notify when a file is renamed, created, or deleted in the directory or subtree
 const FILE_NOTIFY_CHANGE_DIR_NAME: comptime_int = 0x00000002; // notify when a directory is created or deleted in the directory or subtree
@@ -34,6 +36,25 @@ pub const WIN32_VARS = struct {
     opt_hm_handle_to_path: ?std.AutoHashMap(win32.HANDLE, []const u8) = null, // map watchdog IDs to paths
 };
 const DEFAULT_WIN32_FLAGS: win32.FileNotifyChangeFilter = .{};
+
+/////////////////////////////////
+// PRIVATE STRUCT DECLARATIONS //
+/////////////////////////////////
+
+const OVERLAPPED_STATE: type = struct {
+    ov: win32.OVERLAPPED,
+    event: win32.HANDLE,
+    buf: [WIN32_READ_BUF_LEN]u8 align(@alignOf(win32.FILE_NOTIFY_INFORMATION)),
+};
+
+////////////////////////////////////
+// EXTERNAL FUNCTION DECLARATIONS //
+////////////////////////////////////
+
+extern "kernel32" fn ReadDirectoryChangesW(hDirectory: win32.HANDLE, lpBuffer: win32.LPVOID, nBufferLength: win32.DWORD, 
+                                        bWatchSubtree: win32.BOOL, dwNotifyFilter: win32.DWORD, 
+                                        lpBytesReturned: ?*win32.DWORD, lpOverlapped: ?*win32.OVERLAPPED, lpCompletionRoutine: ?*const void,) callconv(.winapi) win32.BOOL;
+extern "kernel32" fn ResetEvent(hEvent: win32.HANDLE) callconv(.winapi) win32.BOOL;
 
 //////////////////////
 // PUBLIC FUNCTIONS //
@@ -94,7 +115,7 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
                                                                             win32.FILE_SHARE_READ | win32.FILE_SHARE_WRITE | win32.FILE_SHARE_DELETE,
                                                                             null,
                                                                             win32.OPEN_EXISTING,
-                                                                            win32.FILE_FLAG_BACKUP_SEMANTICS,
+                                                                            win32.FILE_FLAG_BACKUP_SEMANTICS | win32.FILE_FLAG_OVERLAPPED, // async enabled
                                                                             null,
                                                                         );
             if (file_handle == win32.INVALID_HANDLE_VALUE) return error.FAILED_TO_OPEN_DIR_WIN32;
@@ -121,31 +142,28 @@ pub fn watchdogRemove(p_platform_vars: *WIN32_VARS, path: []const u8) !void {
     if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
     if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
 
-    // removing from handle --> path hashmap
     if (p_platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
+        if (p_platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
+            const handle_to_remove: win32.HANDLE = p_hm_path_to_handle.get(path) orelse return error.HM_DOES_NOT_CONTAIN_PATH;
 
-        if (p_platform_vars.opt_hm_path_to_handle) |hm_path_to_handle| {
-            const handle_to_remove: win32.HANDLE = hm_path_to_handle.get(path) orelse return error.HM_DOES_NOT_CONTAIN_PATH;
+            // removing from handle --> path hashmap
+            if (p_hm_handle_to_path.contains(handle_to_remove) == true) { 
 
-        // checking if hashmap value exists
-        if (p_hm_handle_to_path.contains(handle_to_remove) == true) { 
-            if (p_hm_handle_to_path.remove(handle_to_remove) == false) return error.FAILED_TO_REMOVE_HANDLE_FROM_HM; // remove value from hashmap
-        } else return error.HM_HANDLE_TO_PATH_DOES_NOT_CONTAIN_HANDLE;
+                if (p_hm_handle_to_path.remove(handle_to_remove) == false) return error.FAILED_TO_REMOVE_HANDLE_FROM_HM; // remove value from hashmap
 
-        // freeing memory associated with the handle
-        win32.CloseHandle(handle_to_remove); 
+            } else return error.HM_HANDLE_TO_PATH_DOES_NOT_CONTAIN_HANDLE;
 
-        } return error.HM_PATH_TO_HANDLE_NOT_INIT;
+            // freeing memory associated with the handle
+            win32.CloseHandle(handle_to_remove); 
 
-    } else return error.HM_PATH_TO_HANDLE_NOT_INIT;
+            // removing from path --> handle hashmap
+            if (p_hm_path_to_handle.contains(path) == true) { // checking if hashmap value exists
 
-    // removing from path --> handle hashmap
-    if (p_platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
+                if (p_hm_path_to_handle.remove(path) == false) return error.FAILED_TO_REMOVE_PATH_FROM_HM; // remove value from hashmap
 
-        if (p_hm_path_to_handle.contains(path) == true) { // checking if hashmap value exists
-            if (p_hm_path_to_handle.remove(path) == false) return error.FAILED_TO_REMOVE_PATH_FROM_HM; // remove value from hashmap
-        } else return error.PATH_DNE_IN_HM;
+            } else return error.PATH_DNE_IN_HM;
 
+        } else return error.HM_HANDLE_TO_PATH_NOT_INIT;
     } else return error.HM_PATH_TO_HANDLE_NOT_INIT;
 }
 
@@ -161,38 +179,77 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
     if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
     _ = p_error_queue; // unused in windows version   
 
-    // buf to hold handle event info
-    var buf: [MAX_NUM_EVENTS_PER_READ]u8 align(@alignOf(win32.FILE_NOTIFY_INFORMATION)) = undefined; 
+    // buf to hold handle event info --> alignment to ensure that buffer fits events properly
+    // var buf: [WIN32_READ_BUF_LEN]u8 align(@alignOf(win32.FILE_NOTIFY_INFORMATION)) = undefined;
+    // const buf_slice: []align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = buf[0..WIN32_READ_BUF_LEN];
+    // const p_aligned_buf: [*]align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = buf_slice.ptr;
+
+    // Setup OVERLAPPED + Event
+    var ov_state: OVERLAPPED_STATE = .{
+        .buf = undefined,
+        .event = win32.kernel32.CreateEventExW(null, null, win32.CREATE_EVENT_MANUAL_RESET, win32.EVENT_ALL_ACCESS) orelse return error.FAILED_TO_CREATE_EVENT,
+        .ov = undefined,
+    };
+    if (ov_state.event == win32.INVALID_HANDLE_VALUE) return error.FAILED_TO_CREATE_EVENT;
+    defer win32.CloseHandle(ov_state.event);
+    defer _ = ResetEvent(ov_state.event); // reset manual event so next change doesn't immediately trigger due to previous signal.
+    ov_state.ov.hEvent = ov_state.event; // setting event pointer
 
     // collect all available handles
+    var bytes_returned: win32.DWORD = 0;
     if (p_platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
-        var handle_iterator = p_hm_handle_to_path.iterator();
+        var handle_iterator = p_hm_handle_to_path.keyIterator();
 
-        while (handle_iterator.next()) |hm_val| {
-            const curr_handle: win32.HANDLE = hm_val.key_ptr.*;
-            var bytes_returned: win32.DWORD = 0;
+        // iterate over each currently active handle
+        while (handle_iterator.next()) |p_handle| { // returns each handle in hm (keys)
+            const curr_handle: win32.HANDLE = @as(win32.HANDLE, p_handle.*);
 
             // converting ZGA flags to Windows-specific flags
-            const win32_flags: win32.FileNotifyChangeFilter = zgaToWin32Flags(zga_flags);
-            if (std.meta.eql(win32_flags, DEFAULT_WIN32_FLAGS)) return error.INVALID_FLAGS_PARSED;
-            const read_changes_result: win32.BOOL = win32.kernel32.ReadDirectoryChangesW(   curr_handle,
-                                                                                    &buf, 
-                                                                                    @intCast(buf.len), // usize --> DWORD
-                                                                                    win32.FALSE,
-                                                                                    win32_flags,
-                                                                                    &bytes_returned,
-                                                                                    null,
-                                                                                    null,
-                                                                                );
-        
-            // checking if failed capture from ReadDirectoryChangesW
-            if (read_changes_result == win32.FALSE) return error.FAILED_ReadDirectoryChangesW_CALL;
+            const win32_mask: u32 = zgaToWin32Flags(zga_flags);
+            if (win32_mask == 0x0) return error.INVALID_FLAGS_PARSED; // no selections
 
+            const read_changes_result: win32.BOOL = ReadDirectoryChangesW(
+                                                                            curr_handle,
+                                                                            &ov_state.buf[0],
+                                                                            @intCast(ov_state.buf.len),
+                                                                            win32.TRUE,
+                                                                            win32_mask,
+                                                                            &bytes_returned,
+                                                                            &ov_state.ov,
+                                                                            null,
+                                                                        );
+
+            // Checking if error was resultant from async no message (ERROR_IO_PENDING) or an actual error
+            const last_err: win32.Win32Error = win32.kernel32.GetLastError();
+            if (read_changes_result == win32.FALSE and last_err != .IO_PENDING) { // IO_PENDING --> async no response (this is ok)
+                switch(last_err) {
+                    .INVALID_PARAMETER => return error.BUFFER_TOO_LARGE_FOR_NETWORK, // happens when buffer > 64KB on network shares
+                    .NOACCESS => return error.BUFFER_NOT_ALIGNED, // happens when buffer is not aligned to a DWORD boundary
+                    .NOTIFY_ENUM_DIR => return error.MISSED_CHANGES, // happens when system can't record all changes
+                    else => return error.FAILED_ReadDirectoryChangesW_CALL, // unknown failure
+                }
+            }
+
+            // Check for completion (async catchup)
+            var async_read_completed: bool = false;
+            bytes_returned = 0; // reset for next capture
+            const overlapped_res: win32.BOOL = win32.kernel32.GetOverlappedResult(curr_handle, &ov_state.ov, &bytes_returned, win32.FALSE); // don't wait, just check
+            async_read_completed = (overlapped_res != 0); // checking if overlapped result is GOOD
+
+            // Checking validity of async read failure
+            if (async_read_completed != true) {
+                const overlapped_err: win32.Win32Error = win32.kernel32.GetLastError();
+                if (overlapped_err == .IO_INCOMPLETE) return // nothing captured yet
+                else return error.FAILED_GetOverlappedResult; // unknown error
+            }
+
+            // only reach this code if valid data has been grabbed by ReadDirectoryChangesW call
             var offset: usize = 0; // init offset to iterate through the buffer of dir change events
             while (offset < bytes_returned) { // iterate over ea notify obj that is sent to buf of ReadDirectoryChangesW
 
                 // calc filename ptr for collecting the file that changes act on
-                const info: *win32.FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(&buf[offset]));
+                const info: *win32.FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(&ov_state.buf[offset]));
+
                 const info_filename_start_loc_p_int: usize = @intFromPtr(&info.FileNameLength) + @sizeOf(win32.DWORD);
                 const p_info_filename: [*]const u16 = @ptrFromInt(info_filename_start_loc_p_int);
                 const name_len_wchar: usize = info.FileNameLength / 2; // in WCHARs
@@ -284,6 +341,7 @@ fn win32ToZGAFlags(win32_flags: win32.FileNotifyChangeFilter) u32 {
     if (win32_flags.last_write == true) zga_mask |= zga.ZGA_MODIFIED;
     if (win32_flags.creation == true) zga_mask |= zga.ZGA_CREATE;
     if (win32_flags.last_access == true) zga_mask |= zga.ZGA_ACCESSED;
+    // don't check for security (currently not avail in ZGA)
 
     return zga_mask;
 }
@@ -292,17 +350,19 @@ fn win32ToZGAFlags(win32_flags: win32.FileNotifyChangeFilter) u32 {
 ///
 /// PARAMS:
 /// - `zga_mask`: A bitmask composed of ZGA event flags.
-fn zgaToWin32Flags(zga_mask: u32) win32.FileNotifyChangeFilter {
-    var win32_flags: win32.FileNotifyChangeFilter = .{};
+fn zgaToWin32Flags(zga_mask: u32) u32 {
+    var win32_mask: u32 = 0x0;
 
-    if ((zga_mask & zga.ZGA_MOVED) != 0) win32_flags.file_name = true;
-    if ((zga_mask & zga.ZGA_ATTRIB) != 0) win32_flags.attributes = true;
-    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_flags.size = true;
-    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_flags.last_write = true;
-    if ((zga_mask & zga.ZGA_CREATE) != 0) win32_flags.creation = true;
-    if ((zga_mask & zga.ZGA_ACCESSED) != 0) win32_flags.last_access = true;
+    if ((zga_mask & zga.ZGA_MOVED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_FILE_NAME;
+    if ((zga_mask & zga.ZGA_MOVED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_DIR_NAME;
+    if ((zga_mask & zga.ZGA_ATTRIB) != 0) win32_mask |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
+    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_SIZE;
+    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+    if ((zga_mask & zga.ZGA_ACCESSED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_LAST_ACCESS;
+    if ((zga_mask & zga.ZGA_CREATE) != 0) win32_mask |= FILE_NOTIFY_CHANGE_CREATION;
+    // if ((zga_mask & zga.ZGA_SECURITY) != 0) win32_mask |= FILE_NOTIFY_CHANGE_SECURITY; // don't check for security (currently not avail in ZGA)
 
-    return win32_flags;
+    return win32_mask;
 }
 
 ///////////////////////////
@@ -451,41 +511,161 @@ test "watchdogAdd: invalid path provided (length not of valid path length)" {
     try std.testing.expectError(error.WIN32_PATH_TOO_LONG, result);
 }
 
-test "watchdogAdd: path added to hashmap and working in ZGA-land - win32 handle cannot be created (path not valid)" {
+test "watchdogAdd: path not valid on target system" {
+    // - Init watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
 
+    // Attempt to add invalid path through win32 API
+    const result = watchdogAdd(&wd.platform_vars, "./this_path_should_never_exist.abcdefg", zga.ZGA_CREATE);
+
+    // Check that error is returned for invalid watch path
+    try std.testing.expectError(error.FileNotFound, result);
 }
 
 // watchdogRemove //
 
 test "watchdogRemove: fails if not initialized" {
-    // - Use uninitialized WIN32_VARS
+    // - Use uninit WIN32_VARS
+    var wd: zga.ZGA_WATCHDOG = .{};
+
     // - Try to remove path, check for error
+    const result = watchdogRemove(&wd.platform_vars, "./test/test_file1.txt");
+
+    // Should return error for uninit wd
+    try std.testing.expectError(error.HM_HANDLE_TO_PATH_NOT_INIT, result);
 }
 
 test "watchdogRemove: fails if path does not exist" {
     // - Init watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
     // - Remove path not added
+    const result = watchdogRemove(&wd.platform_vars, "./test/test_file1.txt");
+
     // - Check for correct error
+    try std.testing.expectError(error.HM_DOES_NOT_CONTAIN_PATH, result);
 }
 
 test "watchdogRemove: removes valid path and handle" {
     // - Init watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
     // - Add path
+    try watchdogAdd(&wd.platform_vars, "./test/test_file1.txt", zga.ZGA_CREATE);
+
+    // - Ensure that hashmaps are valid
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle != null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path != null);
+
+    // - Ensure entries added to hashmap
+    const result1 = wd.platform_vars.opt_hm_path_to_handle.?.get("./test/test_file1.txt");
+    try std.testing.expect(result1 != null);
+    const result2 = wd.platform_vars.opt_hm_handle_to_path.?.get(result1.?);
+    try std.testing.expect(result2 != null);
+    
+    // storing handle for check later (after free)
+    const handle_slice = try alloc.alloc(win32.HANDLE, 1);
+    defer alloc.free(handle_slice);
+    @memset(handle_slice, result1.?);
+    
     // - Remove path
-    // - Ensure entries removed from hashmaps and handle closed
+    try watchdogRemove(&wd.platform_vars, "./test/test_file1.txt");
+
+    // - Ensure that hashmaps are still valid
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle != null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path != null);
+
+    // - Ensure entries removed from hashmaps (and handle closed)
+    const result3 = wd.platform_vars.opt_hm_path_to_handle.?.get("./test/test_file1.txt");
+    try std.testing.expect(result3 == null);
+    const result4 = wd.platform_vars.opt_hm_handle_to_path.?.get(handle_slice[0]);
+    try std.testing.expect(result4 == null);
 }
 
 // watchdogRead //
 
 test "watchdogRead: fails if not initialized" {
-    // - Pass uninitialized WIN32_VARS
+    // - Create uninit WIN32_VARS
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+
+    // creating buffers for valid watchdogRead
+    const event_buf: []zga.ZGA_EVENT = try alloc.alloc(zga.ZGA_EVENT, zga.SIZE_EVENT_QUEUE);
+    defer alloc.free(event_buf);
+    const error_buf: []anyerror = try alloc.alloc(anyerror, zga.SIZE_ERROR_QUEUE);
+    defer alloc.free(error_buf);
+    var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(event_buf); // init the LinearFIFO 
+    var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(error_buf); // init the LinearFIFO 
+
+    // - Pass uninit WIN32_VARS to watchdogRead
+    const result = watchdogRead(&wd.platform_vars, zga.ZGA_CREATE, &event_queue, &error_queue);
+
     // - Ensure correct error is returned
+    try std.testing.expectError(error.HM_HANDLE_TO_PATH_NOT_INIT, result);
 }
 
 test "watchdogRead: returns valid events on change" {
-    // - Add path and perform file modification
-    // - Read events
-    // - Validate event(s) added to the queue with expected data
+    // init watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
+    // creating buffers for valid watchdogRead
+    const event_buf: []zga.ZGA_EVENT = try alloc.alloc(zga.ZGA_EVENT, zga.SIZE_EVENT_QUEUE);
+    defer alloc.free(event_buf);
+    const error_buf: []anyerror = try alloc.alloc(anyerror, zga.SIZE_ERROR_QUEUE);
+    defer alloc.free(error_buf);
+    var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(event_buf); // init the LinearFIFO 
+    var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(error_buf); // init the LinearFIFO 
+
+    // - Create temp directory for storing files
+    var tmp_dir: std.testing.TmpDir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var tmp_dir_loc_buf: [zga.MAX_PATH_SIZE]u8 = undefined;
+    const tmp_dir_loc: []const u8 = try tmp_dir.parent_dir.realpath(".", tmp_dir_loc_buf[0..zga.MAX_PATH_SIZE]);
+    
+    // - Add path watcher
+    try watchdogAdd(&wd.platform_vars, tmp_dir_loc, zga.ZGA_CREATE | zga.ZGA_MOVED | zga.ZGA_ACCESSED);
+
+    // - Read events --> does not work like inotify version --> does not show previous events before call
+    try watchdogRead(&wd.platform_vars, zga.ZGA_CREATE, &event_queue, &error_queue);
+
+    // Creating files to check against watchdogRead
+    const file_creation_path: []const u8 = try std.fmt.allocPrint(alloc, "{s}/threaded_temp_file.txt", .{tmp_dir_loc});
+    defer alloc.free(file_creation_path);
+    var cwd = std.fs.cwd();
+    const file = try cwd.createFile(file_creation_path, .{});
+    file.close();
+    _ = try cwd.deleteFile(file_creation_path);
+
+    // // - Pull events from the queue --> checking that they exist
+    // const create_event = event_queue.readItem();
+    // try std.testing.expect(create_event != null);
+    // const delete_event = event_queue.readItem();
+    // try std.testing.expect(delete_event != null);
+
+    // // - Verify that create_event acts as expected
+    // try std.testing.expect(create_event.?.zga_flags == zga.ZGA_CREATE);
+    // try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "./test/wd_read_test_file_987654321.txt");
+
+    // // - Verify that delete_event acts as expected
+    // try std.testing.expect(delete_event.?.zga_flags == zga.ZGA_DELETE);
+    // try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "./test/wd_read_test_file_987654321.txt");   
+}
+
+test "watchdogRead: Successfully reads and processes multiple of the same events after deactivation and reactivation" {
+
 }
 
 test "watchdogRead: returns correct zga_flags" {
@@ -532,3 +712,8 @@ test "win32ToZGAFlags: converts Win32 filter to correct ZGA flags" {
     // - Provide Win32 flags
     // - Verify returned ZGA bitmask matches
 }
+
+////////////////////
+// TEST FUNCTIONS //
+////////////////////
+

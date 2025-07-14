@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const _win = @import("_win.zig");
+pub const _win = @import("_win.zig");
 const _inotify = @import("_inotify.zig");
 const zga_backend: type = selectBackend();
 
@@ -180,14 +180,14 @@ pub const ZGA_WATCHDOG: type = struct {
         defer self.event_queue_mutex.unlock();
 
         // checking if events queue is empty --> return error
-        if (self.event_queue.readableLength() == 0) return error.EMPTY_EVENT_QUEUE;
+        if (self.event_queue.readableLength() == 0) return &.{}; // return empty slice
 
         // init ArrayList to store the events --> to be dealloc'd externally
         var l_arrlist = std.ArrayList(ZGA_EVENT).init(alloc);
 
         // cycle over each item in the events queue --> popping each
         while (self.event_queue.readItem()) |curr_item| {
-            l_arrlist.append(curr_item); // pop each item and store in Arraylist
+            try l_arrlist.append(curr_item); // pop each item and store in Arraylist
         }
 
         return l_arrlist.toOwnedSlice(); // to be dealloc'd externally
@@ -208,7 +208,7 @@ pub const ZGA_WATCHDOG: type = struct {
         defer self.event_queue_mutex.unlock();
 
         // checking if events queue is empty --> return error
-        if (self.event_queue.readableLength() == 0) return error.EMPTY_EVENT_QUEUE;
+        if (self.event_queue.readableLength() == 0) return; // return --> nothing to process
 
         // cycle over each item in the events queue --> popping each
         while (self.event_queue.readItem()) |*p_curr_item| {
@@ -245,14 +245,14 @@ pub const ZGA_WATCHDOG: type = struct {
         defer self.error_queue_mutex.unlock();
 
         // checking if error queue is empty --> return error
-        if (self.error_queue.readableLength() == 0) return error.EMPTY_ERROR_QUEUE;
+        if (self.error_queue.readableLength() == 0) return &.{}; // return empty slice
 
         // init ArrayList to store the errors --> to be dealloc'd externally
         var l_arrlist = std.ArrayList(anyerror).init(alloc);
 
         // cycle over each item in the error queue --> popping each
         while (self.error_queue.readItem()) |curr_item| {
-            l_arrlist.append(curr_item); // pop each item and store in Arraylist
+            try l_arrlist.append(curr_item); // pop each item and store in Arraylist
         }
 
         return l_arrlist.toOwnedSlice(); // to be dealloc'd externally
@@ -274,7 +274,7 @@ pub const ZGA_WATCHDOG: type = struct {
         defer self.error_queue_mutex.unlock();
 
         // checking if error queue is empty --> return error
-        if (self.error_queue.readableLength() == 0) return error.EMPTY_ERROR_QUEUE;
+        if (self.error_queue.readableLength() == 0) return; // return --> nothing to process
 
         // cycle over each item in the error queue --> popping each
         while (self.error_queue.readItem()) |*p_curr_item| {

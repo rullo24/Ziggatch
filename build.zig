@@ -31,6 +31,8 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = zga_src_lazypath,
         .target = def_target,
         .optimize = def_optimise,
+        .strip = false, // allow stderr print to console
+        .error_tracing = true,
     });
     const run_zga_tests = b.addRunArtifact(zga_test_step);
     test_build_step.dependOn(&run_zga_tests.step); // adding test to fleet of tests
@@ -42,7 +44,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = inotify_src_lazypath,
             .target = def_target,
             .optimize = def_optimise,
+            .strip = false, // allow stderr print to console
+            .error_tracing = true,
         });
+        inotify_test_step.stack_size = 1024 * 1024 * 32; // 32MB stack size
         inotify_test_step.root_module.addImport("ZGA", ZGA_module);
         const run_inotify_tests = b.addRunArtifact(inotify_test_step);
         test_build_step.dependOn(&run_inotify_tests.step); // adding test to fleet of tests
@@ -55,7 +60,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = win_src_lazypath,
             .target = def_target,
             .optimize = def_optimise,
+            .strip = false, // allow stderr print to console
+            .error_tracing = true,
         });
+        win_test_step.stack_size = 1024 * 1024 * 32; // 32MB stack size
         win_test_step.root_module.addImport("ZGA", ZGA_module);
         const run_win_tests = b.addRunArtifact(win_test_step);
         test_build_step.dependOn(&run_win_tests.step); // adding test to fleet of tests
