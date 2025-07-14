@@ -16,6 +16,8 @@ const zga_backend: type = selectBackend();
 // MAGIC NUMBER DECLARATIONS //
 ///////////////////////////////
 
+pub const MAX_PATH_SIZE: comptime_int = if (builtin.target.os.tag == .windows) std.os.windows.PATH_MAX_WIDE else if (builtin.target.os.tag == .linux) std.os.linux.PATH_MAX else @compileError("ERROR: INVALID operating system");
+
 pub const SIZE_EVENT_QUEUE: usize           = 1024;
 pub const SIZE_ERROR_QUEUE: usize           = 1024;
 
@@ -39,7 +41,7 @@ var error_buf: [SIZE_ERROR_QUEUE]anyerror = undefined;
 
 // represents a change to filesystem
 pub const ZGA_EVENT = struct {
-    name_buf: [std.fs.max_path_bytes]u8 = undefined, // holds the path
+    name_buf: [MAX_PATH_SIZE]u8 = undefined, // holds the path
     name_len: usize = 0, // holds the valid byte len of name_buf
     zga_flags: u32 = 0x0,
 };

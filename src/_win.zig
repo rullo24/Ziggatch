@@ -70,10 +70,15 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
     if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
     if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
 
+    // checking if path is valid on target system
+    if (path.len >= zga.MAX_PATH_SIZE) return error.WIN32_PATH_TOO_LONG;
+    const cwd: std.fs.Dir = std.fs.cwd();
+    try cwd.access(path, .{});
+
     _ = flags; // unused in Windows version
 
     // grabbing UTF-16 Le path for windows funcs using only stack allocations
-    var utf8_temp_buf: [std.fs.max_path_bytes]u16 = undefined; // stack-allocated buffer for temporary conversions (only need half of this size --> leaving incase I've missed something)
+    var utf8_temp_buf: [zga.MAX_PATH_SIZE]u16 = undefined; // stack-allocated buffer for temporary conversions (only need half of this size --> leaving incase I've missed something)
     if (try std.unicode.checkUtf8ToUtf16LeOverflow(path, &utf8_temp_buf) == true) return error.UTF8_TEMP_BUF_WOULD_OVERFLOW; // avoid memory leak
     const num_indexes_written_lpcwstr: usize = try std.unicode.utf8ToUtf16Le(&utf8_temp_buf, path);
 
@@ -102,7 +107,7 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
                 try p_hm_handle_to_path.put(file_handle, path);
             } else return error.HM_HANDLE_TO_PATH_NOT_INIT;
 
-        } else return error.HM_PATH_TO_HANDLE_DOES_NOT_CONTAIN_PATH;
+        } else return error.HM_PATH_TO_HANDLE_ALREADY_CONTAINS_PATH;
 
     } else return error.HM_PATH_TO_HANDLE_NOT_INIT;
 }
@@ -119,7 +124,7 @@ pub fn watchdogRemove(p_platform_vars: *WIN32_VARS, path: []const u8) !void {
     // removing from handle --> path hashmap
     if (p_platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
 
-        if (p_platform_vars.opt_hp_wdm_path_to_handle) |hm_path_to_handle| {
+        if (p_platform_vars.opt_hm_path_to_handle) |hm_path_to_handle| {
             const handle_to_remove: win32.HANDLE = hm_path_to_handle.get(path) orelse return error.HM_DOES_NOT_CONTAIN_PATH;
 
         // checking if hashmap value exists
@@ -347,14 +352,107 @@ test "watchdogAdd: fails if not init" {
 
 test "watchdogAdd: successfully adds a valid path" {
     // - Init watchdog
+    var wd: zga.ZGA_WATCHDOG = .{};
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
     // - Create temporary test directory
+    // const tmp_dir: std.testing.TmpDir = std.testing.tmpDir(.{});
+    // const tmp_dir_loc: []const u8 = &tmp_dir.sub_path;
+    const tmp_dir_loc: []const u8 = "./test";
+
     // - Add directory path
+    try watchdogAdd(&wd.platform_vars, tmp_dir_loc, zga.ZGA_ACCESSED);
+
+    // - Ensure that hashmaps are still initialised
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path != null);
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle != null);
+
     // - Ensure handle stored in both hashmaps
+    const opt_handle_from_path = wd.platform_vars.opt_hm_path_to_handle.?.get(tmp_dir_loc);
+    try std.testing.expect(opt_handle_from_path != null);
+
+    const opt_path_from_handle = wd.platform_vars.opt_hm_handle_to_path.?.get(opt_handle_from_path.?);
+    try std.testing.expect(opt_path_from_handle != null);
 }
 
 test "watchdogAdd: fails on duplicate path" {
+    // - Init watchdog
+    var wd: zga.ZGA_WATCHDOG = .{};
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
     // - Add the same path twice
+    try watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_CREATE);
+    const result = watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_DELETE);
+
     // - Ensure appropriate error is returned
+    try std.testing.expectError(error.HM_PATH_TO_HANDLE_ALREADY_CONTAINS_PATH, result);
+}
+
+test "watchdogAdd: fails if opt_hm_path_to_handle == null" {
+    // - Init watchdog
+    var wd: zga.ZGA_WATCHDOG = .{};
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
+    // set opt_hm_path_to_handle to null
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle != null);
+    wd.platform_vars.opt_hm_path_to_handle.?.deinit();
+    wd.platform_vars.opt_hm_path_to_handle = null;
+
+    // add new watch location
+    const result = watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_ATTRIB);
+
+    // Ensure that correct error is responded
+    try std.testing.expectError(error.HM_PATH_TO_HANDLE_NOT_INIT, result);
+}
+
+test "watchdogAdd: fails if opt_hm_handle_to_path == null" {
+    // - Init watchdog
+    var wd: zga.ZGA_WATCHDOG = .{};
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
+    // set opt_hm_handle_to_path to null
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path != null);
+    wd.platform_vars.opt_hm_handle_to_path.?.deinit();
+    wd.platform_vars.opt_hm_handle_to_path = null;
+
+    // add new watch location
+    const result = watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_ATTRIB);
+
+    // Ensure that correct error is responded
+    try std.testing.expectError(error.HM_HANDLE_TO_PATH_NOT_INIT, result);
+
+}
+
+test "watchdogAdd: invalid path provided (length not of valid path length)" {
+    // - Init watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
+    // - Add invalid path w/ length > win32.PATH_MAX_WIDE (win32 --> must be greater than 37,767 bytes)
+    const buf: []u8 = try alloc.alloc(u8, zga.MAX_PATH_SIZE);
+    defer alloc.free(buf);
+    for (buf) |*p_c| p_c.* = 'A'; // setting all values in buffer to 'A' (x100_000)
+    try std.testing.expectEqualStrings(buf[0..10], "AAAAAAAAAA");
+
+    // - Add watchdog from path that is huge
+    const result = watchdogAdd(&wd.platform_vars, buf, zga.ZGA_CREATE);
+
+    // - Check that error returns as expected
+    try std.testing.expectError(error.WIN32_PATH_TOO_LONG, result);
+}
+
+test "watchdogAdd: path added to hashmap and working in ZGA-land - win32 handle cannot be created (path not valid)" {
+
 }
 
 // watchdogRemove //
