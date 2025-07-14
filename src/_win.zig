@@ -386,6 +386,7 @@ fn win32ToZGAFlags(win32_flags: win32.FileNotifyChangeFilter) u32 {
 
     // ignoring irrelevant or non-used win32-specific constants
     if (win32_flags.file_name == true) zga_mask |= zga.ZGA_MOVED;
+    if (win32_flags.dir_name == true) zga_mask |= zga.ZGA_MOVED;
     if (win32_flags.attributes == true) zga_mask |= zga.ZGA_ATTRIB;
     if (win32_flags.size == true) zga_mask |= zga.ZGA_MODIFIED;
     if (win32_flags.last_write == true) zga_mask |= zga.ZGA_MODIFIED;
