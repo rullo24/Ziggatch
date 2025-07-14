@@ -17,6 +17,7 @@ const builtin = @import("builtin");
 
 const MAX_NUM_EVENTS_PER_READ: comptime_int = 512;
 const WIN32_READ_BUF_LEN = MAX_NUM_EVENTS_PER_READ * @sizeOf(win32.FILE_NOTIFY_INFORMATION);
+const MAX_WATCHDOG_HANDLES: comptime_int = 64; // max number of directories to watch
 
 const FILE_NOTIFY_CHANGE_FILE_NAME: comptime_int = 0x00000001; // notify when a file is renamed, created, or deleted in the directory or subtree
 const FILE_NOTIFY_CHANGE_DIR_NAME: comptime_int = 0x00000002; // notify when a directory is created or deleted in the directory or subtree
@@ -179,11 +180,6 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
     if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
     _ = p_error_queue; // unused in windows version   
 
-    // buf to hold handle event info --> alignment to ensure that buffer fits events properly
-    // var buf: [WIN32_READ_BUF_LEN]u8 align(@alignOf(win32.FILE_NOTIFY_INFORMATION)) = undefined;
-    // const buf_slice: []align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = buf[0..WIN32_READ_BUF_LEN];
-    // const p_aligned_buf: [*]align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = buf_slice.ptr;
-
     // Setup OVERLAPPED + Event
     var ov_state: OVERLAPPED_STATE = .{
         .buf = undefined,
@@ -205,15 +201,17 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
             const curr_handle: win32.HANDLE = @as(win32.HANDLE, p_handle.*);
 
             // converting ZGA flags to Windows-specific flags
-            const win32_mask: u32 = zgaToWin32Flags(zga_flags);
-            if (win32_mask == 0x0) return error.INVALID_FLAGS_PARSED; // no selections
+            const win32_flags: win32.FileNotifyChangeFilter = zgaToWin32Flags(zga_flags);
+            if (win32_flags == DEFAULT_WIN32_FLAGS) return error.INVALID_FLAGS_PARSED; // if no selections
 
-            const read_changes_result: win32.BOOL = ReadDirectoryChangesW(
+            const buf_slice: []align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = ov_state.buf[0..ov_state.buf.len]; // slice maps entire buffer
+            const p_aligned_buf: [*]align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = buf_slice.ptr; // aligned ptr to buf slice
+            const read_changes_result: win32.BOOL = win32.kernel32.ReadDirectoryChangesW(
                                                                             curr_handle,
-                                                                            &ov_state.buf[0],
+                                                                            p_aligned_buf,
                                                                             @intCast(ov_state.buf.len),
                                                                             win32.TRUE,
-                                                                            win32_mask,
+                                                                            win32_flags,
                                                                             &bytes_returned,
                                                                             &ov_state.ov,
                                                                             null,
@@ -226,7 +224,12 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
                     .INVALID_PARAMETER => return error.BUFFER_TOO_LARGE_FOR_NETWORK, // happens when buffer > 64KB on network shares
                     .NOACCESS => return error.BUFFER_NOT_ALIGNED, // happens when buffer is not aligned to a DWORD boundary
                     .NOTIFY_ENUM_DIR => return error.MISSED_CHANGES, // happens when system can't record all changes
-                    else => return error.FAILED_ReadDirectoryChangesW_CALL, // unknown failure
+                    else => { // unknown failure
+                        const stderr = std.io.getStdErr();
+                        const stderr_writer = stderr.writer();
+                        try stderr_writer.print("ReadDirectoryChanges Failed (Win32Error: {d})\n", .{@intFromEnum(last_err)});
+                        return error.FAILED_ReadDirectoryChangesW_CALL;
+                    }
                 }
             }
 
@@ -350,19 +353,19 @@ fn win32ToZGAFlags(win32_flags: win32.FileNotifyChangeFilter) u32 {
 ///
 /// PARAMS:
 /// - `zga_mask`: A bitmask composed of ZGA event flags.
-fn zgaToWin32Flags(zga_mask: u32) u32 {
-    var win32_mask: u32 = 0x0;
+fn zgaToWin32Flags(zga_mask: u32) win32.FileNotifyChangeFilter {
+    var win32_flags: win32.FileNotifyChangeFilter = .{};
 
-    if ((zga_mask & zga.ZGA_MOVED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_FILE_NAME;
-    if ((zga_mask & zga.ZGA_MOVED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_DIR_NAME;
-    if ((zga_mask & zga.ZGA_ATTRIB) != 0) win32_mask |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
-    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_SIZE;
-    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_LAST_WRITE;
-    if ((zga_mask & zga.ZGA_ACCESSED) != 0) win32_mask |= FILE_NOTIFY_CHANGE_LAST_ACCESS;
-    if ((zga_mask & zga.ZGA_CREATE) != 0) win32_mask |= FILE_NOTIFY_CHANGE_CREATION;
+    if ((zga_mask & zga.ZGA_MOVED) != 0) win32_flags.file_name = true;
+    if ((zga_mask & zga.ZGA_MOVED) != 0) win32_flags.dir_name = true;
+    if ((zga_mask & zga.ZGA_ATTRIB) != 0) win32_flags.attributes = true;
+    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_flags.size = true;
+    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_flags.last_write = true; 
+    if ((zga_mask & zga.ZGA_ACCESSED) != 0) win32_flags.last_access = true;
+    if ((zga_mask & zga.ZGA_CREATE) != 0) win32_flags.creation = true;
     // if ((zga_mask & zga.ZGA_SECURITY) != 0) win32_mask |= FILE_NOTIFY_CHANGE_SECURITY; // don't check for security (currently not avail in ZGA)
 
-    return win32_mask;
+    return win32_flags;
 }
 
 ///////////////////////////
