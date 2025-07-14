@@ -76,7 +76,10 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
     var utf8_temp_buf: [std.fs.max_path_bytes]u16 = undefined; // stack-allocated buffer for temporary conversions (only need half of this size --> leaving incase I've missed something)
     if (try std.unicode.checkUtf8ToUtf16LeOverflow(path, &utf8_temp_buf) == true) return error.UTF8_TEMP_BUF_WOULD_OVERFLOW; // avoid memory leak
     const num_indexes_written_lpcwstr: usize = try std.unicode.utf8ToUtf16Le(&utf8_temp_buf, path);
-    const path_as_lpcwstr: [:0]const u16 = utf8_temp_buf[0..num_indexes_written_lpcwstr];
+
+    // null-terminating resultant string and converting to slice
+    utf8_temp_buf[num_indexes_written_lpcwstr] = 0x0; // setting last character to the null-terminator
+    const path_as_lpcwstr: [:0]const u16 = utf8_temp_buf[0..num_indexes_written_lpcwstr :0];
 
     // only creating new handle if one doesn't already exist --> will only happen on first attempt
     if (p_platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
@@ -295,4 +298,139 @@ fn zgaToWin32Flags(zga_mask: u32) win32.FileNotifyChangeFilter {
     if ((zga_mask & zga.ZGA_ACCESSED) != 0) win32_flags.last_access = true;
 
     return win32_flags;
+}
+
+///////////////////////////
+// PUBLIC FUNCTION TESTS //
+///////////////////////////
+
+// watchdogInit //
+
+test "watchdogInit: inits empty internal hashmaps" {
+    // create wd object
+    var wd: zga.ZGA_WATCHDOG = .{};
+    const alloc: std.mem.Allocator = std.testing.allocator;
+
+    // - Expect hashmaps to be null before
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle == null);
+
+    // - Call watchdogInit
+    try watchdogInit(&wd.platform_vars, alloc);
+
+    // - Expect hashmaps to be non-null after
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path != null);
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle != null);
+
+    // - Test error on double init
+    const res2 = watchdogInit(&wd.platform_vars, alloc);
+    try std.testing.expectError(error.HM_HANDLE_TO_PATH_INIT_ALREADY, res2);
+}
+
+// watchdogAdd //
+
+test "watchdogAdd: fails if not init" {
+    // - Create obj
+    var wd: zga.ZGA_WATCHDOG = .{};
+
+    // create tmp testing dir
+    const tmp_dir: std.testing.TmpDir = std.testing.tmpDir(.{});
+    const tmp_dir_loc: []const u8 = &tmp_dir.sub_path;
+
+    // - Pass uninit WIN32_VARS
+    const result = watchdogAdd(&wd.platform_vars, tmp_dir_loc, zga.ZGA_CREATE);
+
+    // - Expect correct error return
+    try std.testing.expectError(error.HM_HANDLE_TO_PATH_NOT_INIT, result);
+
+}
+
+test "watchdogAdd: successfully adds a valid path" {
+    // - Init watchdog
+    // - Create temporary test directory
+    // - Add directory path
+    // - Ensure handle stored in both hashmaps
+}
+
+test "watchdogAdd: fails on duplicate path" {
+    // - Add the same path twice
+    // - Ensure appropriate error is returned
+}
+
+// watchdogRemove //
+
+test "watchdogRemove: fails if not initialized" {
+    // - Use uninitialized WIN32_VARS
+    // - Try to remove path, check for error
+}
+
+test "watchdogRemove: fails if path does not exist" {
+    // - Init watchdog
+    // - Remove path not added
+    // - Check for correct error
+}
+
+test "watchdogRemove: removes valid path and handle" {
+    // - Init watchdog
+    // - Add path
+    // - Remove path
+    // - Ensure entries removed from hashmaps and handle closed
+}
+
+// watchdogRead //
+
+test "watchdogRead: fails if not initialized" {
+    // - Pass uninitialized WIN32_VARS
+    // - Ensure correct error is returned
+}
+
+test "watchdogRead: returns valid events on change" {
+    // - Add path and perform file modification
+    // - Read events
+    // - Validate event(s) added to the queue with expected data
+}
+
+test "watchdogRead: returns correct zga_flags" {
+    // - Add path with specific zga_flags
+    // - Make appropriate changes (e.g., rename, write)
+    // - Validate that event.zga_flags matches expected ones
+}
+
+// watchdogList //
+
+test "watchdogList: fails if not initialized" {
+    // - Call watchdogList on uninitialized WIN32_VARS
+    // - Expect correct error
+}
+
+test "watchdogList: returns correct paths" {
+    // - Add multiple paths
+    // - Call watchdogList
+    // - Confirm all paths are listed
+}
+
+// watchdogDeinit //
+
+test "watchdogDeinit: cleans up all handles and hashmaps" {
+    // - Add multiple paths
+    // - Call watchdogDeinit
+    // - Confirm hashmaps are null and handles are closed
+}
+
+////////////////////////////
+// PRIVATE FUNCTION TESTS //
+////////////////////////////
+
+// zgaToWin32Flags //
+
+test "zgaToWin32Flags: converts ZGA flags to correct Win32 filter" {
+    // - Provide ZGA flags
+    // - Verify each corresponding Win32 field is set correctly
+}
+
+// win32ToZGAFlags //
+
+test "win32ToZGAFlags: converts Win32 filter to correct ZGA flags" {
+    // - Provide Win32 flags
+    // - Verify returned ZGA bitmask matches
 }
