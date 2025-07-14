@@ -33,8 +33,10 @@ const FILE_NOTIFY_CHANGE_SECURITY: comptime_int = 0x00000100; // notify when the
 ////////////////////////////////
 
 pub const WIN32_VARS = struct {
+    opt_iocp_handle: ?win32.HANDLE = null,
     opt_hm_path_to_handle: ?std.StringHashMap(win32.HANDLE) = null, // map paths to watchdog IDs
     opt_hm_handle_to_path: ?std.AutoHashMap(win32.HANDLE, []const u8) = null, // map watchdog IDs to paths
+    opt_hm_handle_to_overlapped: ?std.AutoHashMap(win32.HANDLE, OVERLAPPED_STATE) = null, // map directory handles to OVERLAPPED_STATEs
 };
 const DEFAULT_WIN32_FLAGS: win32.FileNotifyChangeFilter = .{};
 
@@ -42,10 +44,9 @@ const DEFAULT_WIN32_FLAGS: win32.FileNotifyChangeFilter = .{};
 // PRIVATE STRUCT DECLARATIONS //
 /////////////////////////////////
 
-const OVERLAPPED_STATE: type = struct {
-    ov: win32.OVERLAPPED,
-    event: win32.HANDLE,
-    buf: [WIN32_READ_BUF_LEN]u8 align(@alignOf(win32.FILE_NOTIFY_INFORMATION)),
+const OVERLAPPED_STATE = struct {
+    ov: win32.OVERLAPPED = undefined,
+    buf: [WIN32_READ_BUF_LEN]u8 align(@alignOf(win32.FILE_NOTIFY_INFORMATION)) = undefined,
 };
 
 ////////////////////////////////////
@@ -70,16 +71,25 @@ extern "kernel32" fn ResetEvent(hEvent: win32.HANDLE) callconv(.winapi) win32.BO
 pub fn watchdogInit(p_platform_vars: *WIN32_VARS, alloc: std.mem.Allocator) !void {
     if (p_platform_vars.opt_hm_handle_to_path != null) return error.HM_HANDLE_TO_PATH_INIT_ALREADY;
     if (p_platform_vars.opt_hm_path_to_handle != null) return error.HM_PATH_TO_HANDLE_INIT_ALREADY;
+    if (p_platform_vars.opt_hm_handle_to_overlapped != null) return error.HM_HANDLE_TO_OVERLAPPED_AKREADY_INIT;
+    if (p_platform_vars.opt_iocp_handle != null) return error.IOCP_HANDLE_ALREADY_INIT;
 
     // init hashmap for storing watchdog ptrs
-    const path_to_handle_hm = std.StringHashMap(win32.HANDLE).init(alloc);
+    var path_to_handle_hm = std.StringHashMap(win32.HANDLE).init(alloc);
     errdefer path_to_handle_hm.deinit();
-    const handle_to_path_hm = std.AutoHashMap(win32.HANDLE, []const u8).init(alloc);
+    var handle_to_path_hm = std.AutoHashMap(win32.HANDLE, []const u8).init(alloc);
     errdefer handle_to_path_hm.deinit();
+    var handle_to_overlapped_hm = std.AutoHashMap(win32.HANDLE, OVERLAPPED_STATE).init(alloc);
+    errdefer handle_to_overlapped_hm.deinit();
+
+    // init iocp handler --> for efficient, async I/O
+    const iocp: win32.HANDLE = win32.kernel32.CreateIoCompletionPort(win32.INVALID_HANDLE_VALUE, null, 0x0, 0) orelse return error.IOCP_FAILED_INIT;
 
     // if no errors have occurred --> set values now
     p_platform_vars.opt_hm_path_to_handle = path_to_handle_hm;
     p_platform_vars.opt_hm_handle_to_path = handle_to_path_hm;
+    p_platform_vars.opt_iocp_handle = iocp;
+    p_platform_vars.opt_hm_handle_to_overlapped = handle_to_overlapped_hm;
 }
 
 /// adds a directory path to the watchlist
@@ -91,13 +101,13 @@ pub fn watchdogInit(p_platform_vars: *WIN32_VARS, alloc: std.mem.Allocator) !voi
 pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !void {
     if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
     if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
+    if (p_platform_vars.opt_hm_handle_to_overlapped == null) return error.HM_HANDLE_TO_OVERLAPPED_NOT_INIT;
+    if (p_platform_vars.opt_iocp_handle == null) return error.IOCP_HANDLE_NOT_INIT;
 
     // checking if path is valid on target system
     if (path.len >= zga.MAX_PATH_SIZE) return error.WIN32_PATH_TOO_LONG;
     const cwd: std.fs.Dir = std.fs.cwd();
     try cwd.access(path, .{});
-
-    _ = flags; // unused in Windows version
 
     // grabbing UTF-16 Le path for windows funcs using only stack allocations
     var utf8_temp_buf: [zga.MAX_PATH_SIZE]u16 = undefined; // stack-allocated buffer for temporary conversions (only need half of this size --> leaving incase I've missed something)
@@ -119,7 +129,14 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
                                                                             win32.FILE_FLAG_BACKUP_SEMANTICS | win32.FILE_FLAG_OVERLAPPED, // async enabled
                                                                             null,
                                                                         );
+            errdefer win32.CloseHandle(file_handle);
             if (file_handle == win32.INVALID_HANDLE_VALUE) return error.FAILED_TO_OPEN_DIR_WIN32;
+
+            // associating existing IOCP with new file handle
+            if (p_platform_vars.opt_iocp_handle) |iocp_handle| {
+                const iosc_assoc = win32.kernel32.CreateIoCompletionPort(file_handle, iocp_handle, @intFromPtr(file_handle), 0);
+                if (iosc_assoc == null) return error.FAILED_TO_ASSOC_IOCP;
+            } else return error.IOCP_HANDLE_NOT_INIT;
 
             // adding the path --> handle to the correct HM
             try p_hm_path_to_handle.put(path, file_handle);
@@ -128,6 +145,31 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
             if (p_platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
                 try p_hm_handle_to_path.put(file_handle, path);
             } else return error.HM_HANDLE_TO_PATH_NOT_INIT;
+
+            // grabbing windows flags from ZGA flags
+            const win32_flags: win32.FileNotifyChangeFilter = zgaToWin32Flags(flags);
+            if (win32_flags == DEFAULT_WIN32_FLAGS) return error.INVALID_FLAGS_PARSED; // if no selections
+
+            if (p_platform_vars.opt_hm_handle_to_overlapped) |*p_hm_handle_to_overlapped| {
+                // collecting overlapped ptr from hashmap (for use past stack expiry)
+                try p_hm_handle_to_overlapped.put(file_handle, .{}); // put template ov_state
+                const p_ov_state: *OVERLAPPED_STATE = p_hm_handle_to_overlapped.getPtr(file_handle) orelse return error.HM_HANDLE_NOT_VALID;
+
+                // call first instance of ReadDirectoryChangesW to start async poll
+                const buf_slice: []align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = p_ov_state.buf[0..p_ov_state.buf.len]; // slice maps entire buffer
+                const p_aligned_buf_slice: [*]align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = buf_slice.ptr; // aligned ptr to buf slice
+                const init_read_dir_res: win32.BOOL = win32.kernel32.ReadDirectoryChangesW(
+                    file_handle,
+                    p_aligned_buf_slice,
+                    @intCast(p_ov_state.buf.len),
+                    win32.TRUE,
+                    win32_flags,
+                    null, // no bytes returned asynchronously
+                    &p_ov_state.ov,
+                    null, // no completion routine, since using IOCP
+                );
+                if (init_read_dir_res == win32.FALSE and win32.kernel32.GetLastError() != .IO_PENDING) return error.INVALID_INIT_READ_DIR;
+            }
 
         } else return error.HM_PATH_TO_HANDLE_ALREADY_CONTAINS_PATH;
 
@@ -142,10 +184,21 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
 pub fn watchdogRemove(p_platform_vars: *WIN32_VARS, path: []const u8) !void {
     if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
     if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
+    if (p_platform_vars.opt_hm_handle_to_overlapped == null) return error.HM_HANDLE_TO_OVERLAPPED_NOT_INIT;
+    if (p_platform_vars.opt_iocp_handle == null) return error.IOCP_HANDLE_NOT_INIT;
 
     if (p_platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
         if (p_platform_vars.opt_hm_path_to_handle) |*p_hm_path_to_handle| {
             const handle_to_remove: win32.HANDLE = p_hm_path_to_handle.get(path) orelse return error.HM_DOES_NOT_CONTAIN_PATH;
+
+            // removing from handle --> ov_state hashmap
+            if (p_platform_vars.opt_hm_handle_to_overlapped) |*p_hm_handle_to_ov| {
+
+                if (p_hm_handle_to_ov.contains(handle_to_remove) == true) {
+                    if (p_hm_handle_to_ov.remove(handle_to_remove) == false) return error.FAILED_TO_REMOVE_HANDLE_FROM_HM; // remove val from hashmap
+                }
+
+            }
 
             // removing from handle --> path hashmap
             if (p_hm_handle_to_path.contains(handle_to_remove) == true) { 
@@ -178,103 +231,85 @@ pub fn watchdogRemove(p_platform_vars: *WIN32_VARS, path: []const u8) !void {
 pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue: *std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice), p_error_queue: *std.fifo.LinearFifo(anyerror, .Slice)) !void {
     if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
     if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
-    _ = p_error_queue; // unused in windows version   
+    if (p_platform_vars.opt_hm_handle_to_overlapped == null) return error.HM_HANDLE_TO_OVERLAPPED_NOT_INIT;
+    if (p_platform_vars.opt_iocp_handle == null) return error.IOCP_HANDLE_NOT_INIT;
 
-    // Setup OVERLAPPED + Event
-    var ov_state: OVERLAPPED_STATE = .{
-        .buf = undefined,
-        .event = win32.kernel32.CreateEventExW(null, null, win32.CREATE_EVENT_MANUAL_RESET, win32.EVENT_ALL_ACCESS) orelse return error.FAILED_TO_CREATE_EVENT,
-        .ov = undefined,
-    };
-    if (ov_state.event == win32.INVALID_HANDLE_VALUE) return error.FAILED_TO_CREATE_EVENT;
-    defer win32.CloseHandle(ov_state.event);
-    defer _ = ResetEvent(ov_state.event); // reset manual event so next change doesn't immediately trigger due to previous signal.
-    ov_state.ov.hEvent = ov_state.event; // setting event pointer
-
-    // collect all available handles
-    var bytes_returned: win32.DWORD = 0;
-    if (p_platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| {
-        var handle_iterator = p_hm_handle_to_path.keyIterator();
-
-        // iterate over each currently active handle
-        while (handle_iterator.next()) |p_handle| { // returns each handle in hm (keys)
-            const curr_handle: win32.HANDLE = @as(win32.HANDLE, p_handle.*);
-
-            // converting ZGA flags to Windows-specific flags
-            const win32_flags: win32.FileNotifyChangeFilter = zgaToWin32Flags(zga_flags);
-            if (win32_flags == DEFAULT_WIN32_FLAGS) return error.INVALID_FLAGS_PARSED; // if no selections
-
-            const buf_slice: []align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = ov_state.buf[0..ov_state.buf.len]; // slice maps entire buffer
-            const p_aligned_buf: [*]align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = buf_slice.ptr; // aligned ptr to buf slice
-            const read_changes_result: win32.BOOL = win32.kernel32.ReadDirectoryChangesW(
-                                                                            curr_handle,
-                                                                            p_aligned_buf,
-                                                                            @intCast(ov_state.buf.len),
-                                                                            win32.TRUE,
-                                                                            win32_flags,
-                                                                            &bytes_returned,
-                                                                            &ov_state.ov,
-                                                                            null,
-                                                                        );
-
-            // Checking if error was resultant from async no message (ERROR_IO_PENDING) or an actual error
-            const last_err: win32.Win32Error = win32.kernel32.GetLastError();
-            if (read_changes_result == win32.FALSE and last_err != .IO_PENDING) { // IO_PENDING --> async no response (this is ok)
-                switch(last_err) {
-                    .INVALID_PARAMETER => return error.BUFFER_TOO_LARGE_FOR_NETWORK, // happens when buffer > 64KB on network shares
-                    .NOACCESS => return error.BUFFER_NOT_ALIGNED, // happens when buffer is not aligned to a DWORD boundary
-                    .NOTIFY_ENUM_DIR => return error.MISSED_CHANGES, // happens when system can't record all changes
-                    else => { // unknown failure
-                        const stderr = std.io.getStdErr();
-                        const stderr_writer = stderr.writer();
-                        try stderr_writer.print("ReadDirectoryChanges Failed (Win32Error: {d})\n", .{@intFromEnum(last_err)});
-                        return error.FAILED_ReadDirectoryChangesW_CALL;
-                    }
-                }
-            }
-
-            // Check for completion (async catchup)
-            var async_read_completed: bool = false;
-            bytes_returned = 0; // reset for next capture
-            const overlapped_res: win32.BOOL = win32.kernel32.GetOverlappedResult(curr_handle, &ov_state.ov, &bytes_returned, win32.FALSE); // don't wait, just check
-            async_read_completed = (overlapped_res != 0); // checking if overlapped result is GOOD
-
-            // Checking validity of async read failure
-            if (async_read_completed != true) {
-                const overlapped_err: win32.Win32Error = win32.kernel32.GetLastError();
-                if (overlapped_err == .IO_INCOMPLETE) return // nothing captured yet
-                else return error.FAILED_GetOverlappedResult; // unknown error
-            }
-
-            // only reach this code if valid data has been grabbed by ReadDirectoryChangesW call
-            var offset: usize = 0; // init offset to iterate through the buffer of dir change events
-            while (offset < bytes_returned) { // iterate over ea notify obj that is sent to buf of ReadDirectoryChangesW
-
-                // calc filename ptr for collecting the file that changes act on
-                const info: *win32.FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(&ov_state.buf[offset]));
-
-                const info_filename_start_loc_p_int: usize = @intFromPtr(&info.FileNameLength) + @sizeOf(win32.DWORD);
-                const p_info_filename: [*]const u16 = @ptrFromInt(info_filename_start_loc_p_int);
-                const name_len_wchar: usize = info.FileNameLength / 2; // in WCHARs
-
-                // creating ZGA_EVENT obj from relevant vars
-                var curr_event: zga.ZGA_EVENT = .{};
-                curr_event.zga_flags = zga_flags;
-
-                // conv UTF-16 filename slice to UTF-8 in a fixed buffer.
-                const name_slice: []const u16 = p_info_filename[0..name_len_wchar];
-                const bytes_written: usize = try std.unicode.utf16LeToUtf8(&curr_event.name_buf, name_slice); // writing to obj for queue
-                curr_event.name_len = bytes_written;
-
-                // pushing current event to the global queue
-                try p_event_queue.writeItem(curr_event);
-
-                // move to next event entry, or break if this is the last one
-                if (info.NextEntryOffset == 0) break;
-                offset += @intCast(info.NextEntryOffset);
-            }
+    // collect queued completion entries (blocking wait)
+    var num_completed_entries: u32 = 0;
+    var completion_io_entries: [MAX_WATCHDOG_HANDLES]win32.OVERLAPPED_ENTRY = undefined;
+    if (p_platform_vars.opt_iocp_handle) |iocp_handle| {
+        const queued_completion_ok: win32.BOOL = win32.kernel32.GetQueuedCompletionStatusEx(
+            iocp_handle,
+            &completion_io_entries,
+            MAX_WATCHDOG_HANDLES,
+            &num_completed_entries,
+            win32.INFINITE,
+            win32.FALSE,
+        );
+        if (queued_completion_ok == win32.FALSE) { // fail if queued_completion is not successful
+            const last_err: u16 = @intFromEnum(win32.kernel32.GetLastError());
+            try p_error_queue.writeItem(@errorFromInt(last_err));
+            return error.QUEUED_COMPLETION_NOT_OK;
         }
-    }
+
+        // iterate over all completed IO entries
+        var i: usize = 0;
+        while (i < num_completed_entries) : (i += 1) {
+            const entry: win32.OVERLAPPED_ENTRY = completion_io_entries[i];
+            const curr_handle: win32.HANDLE = @ptrFromInt(entry.lpCompletionKey); // works because we passed @intFromPtr(file_handle) as the key when calling CreateIoCompletionPort.
+            const bytes_transferred: u32 = entry.dwNumberOfBytesTransferred;
+
+            if (p_platform_vars.opt_hm_handle_to_overlapped) |*p_hm_handle_to_ov| {
+                const p_ov_state: *OVERLAPPED_STATE = p_hm_handle_to_ov.getPtr(curr_handle) orelse continue;
+                const p_buf: *[WIN32_READ_BUF_LEN]u8 align(@alignOf(win32.FILE_NOTIFY_INFORMATION)) = &p_ov_state.buf;
+
+                // parse all events within the transferred byte range
+                var offset: usize = 0;
+                while (offset < bytes_transferred) {
+                    const info: *win32.FILE_NOTIFY_INFORMATION = @ptrCast(@alignCast(&p_buf[offset]));
+                    const name_len_wchar: usize = info.FileNameLength / 2;
+                    
+                    // filename is located after FileNameLength field (DWORD)
+                    const p_filename_int: usize = @intFromPtr(&info.NextEntryOffset) + @sizeOf(@TypeOf(info.NextEntryOffset)) + @sizeOf(@TypeOf(info.Action)) + @sizeOf(@TypeOf(info.FileNameLength)); // typedef struct _FILE_NOTIFY_INFORMATION { DWORD NextEntryOffset; DWORD Action; DWORD FileNameLength; WCHAR FileName[1]; } FILE_NOTIFY_INFORMATION, *PFILE_NOTIFY_INFORMATION;
+                    const p_info_filename: [*]const u16 = @ptrFromInt(p_filename_int);
+                    const name_utf16: []const u16 = p_info_filename[0..name_len_wchar];
+
+                    std.debug.print("{any}\n", .{name_utf16});
+
+                    // create and enqueue event
+                    var curr_event: zga.ZGA_EVENT = .{};
+                    curr_event.zga_flags = zga_flags;
+                    curr_event.name_len = try std.unicode.utf16LeToUtf8(&curr_event.name_buf, name_utf16);
+                    try p_event_queue.writeItem(curr_event);
+
+                    // break if this is the final entry
+                    if (info.NextEntryOffset == 0) break;
+                    offset += info.NextEntryOffset; // otherwise increment offset to next entry
+                }
+
+                // extract win32 flags from ZGA bitmask
+                const win32_flags: win32.FileNotifyChangeFilter = zgaToWin32Flags(zga_flags);
+                if (win32_flags == DEFAULT_WIN32_FLAGS) return error.INVALID_FLAGS_PARSED; // if no selections
+
+                // re-issue ReadDirectoryChangesW to continue watching
+                const buf_slice: []align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = p_ov_state.buf[0..p_ov_state.buf.len]; // slice maps entire buffer
+                const p_aligned_buf_slice: [*]align(@alignOf(win32.FILE_NOTIFY_INFORMATION))u8 = buf_slice.ptr; // aligned ptr to buf slice
+                const res: win32.BOOL = win32.kernel32.ReadDirectoryChangesW(
+                    curr_handle,
+                    p_aligned_buf_slice,
+                    @intCast(p_ov_state.buf.len),
+                    win32.TRUE,
+                    win32_flags,
+                    null,
+                    &p_ov_state.ov,
+                    null,
+                );
+
+                // log re-issue errors (only if not async expected)
+                if (res == win32.FALSE and win32.kernel32.GetLastError() != .IO_PENDING) try p_error_queue.writeItem(error.FAILED_Reissue_ReadDirectoryChangesW);
+            } else return error.HM_HANDLE_TO_OVERLAPPED_NOT_INIT;
+        }
+    } else return error.IOCP_HANDLE_NOT_INIT;
 }
 
 /// Returns a slice of filepath strings that are currently being watched. The returned slice must be deallocated externally after use.
@@ -285,6 +320,8 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
 pub fn watchdogList(p_platform_vars: *WIN32_VARS, alloc: std.mem.Allocator) ![]const []const u8 {
     if (p_platform_vars.opt_hm_handle_to_path == null) return error.HM_HANDLE_TO_PATH_NOT_INIT;
     if (p_platform_vars.opt_hm_path_to_handle == null) return error.HM_PATH_TO_HANDLE_NOT_INIT;
+    if (p_platform_vars.opt_hm_handle_to_overlapped == null) return error.HM_HANDLE_TO_OVERLAPPED_NOT_INIT;
+    if (p_platform_vars.opt_iocp_handle == null) return error.IOCP_HANDLE_NOT_INIT;
 
     var wd_watchlist = std.ArrayList([]const u8).init(alloc);
 
@@ -321,9 +358,19 @@ pub fn watchdogDeinit(p_platform_vars: *WIN32_VARS) void {
     // destroy the hashmap (wd --> path)
     if (p_platform_vars.opt_hm_handle_to_path) |*p_hm_handle_to_path| p_hm_handle_to_path.deinit(); // don't return error if already null --> being set to null anyways
 
+    // Closing IOCP handle
+    if (p_platform_vars.opt_iocp_handle) |iocp_handle| {
+        win32.CloseHandle(iocp_handle);
+    }
+
+    // destroy the hashmap (wd --> ov)
+    if (p_platform_vars.opt_hm_handle_to_overlapped) |*p_hm_handle_to_ov| p_hm_handle_to_ov.deinit(); // don't return error if already null --> being set to null anyways
+
     // if no errors have occurred --> reset values now
     p_platform_vars.opt_hm_path_to_handle = null;
     p_platform_vars.opt_hm_handle_to_path = null;
+    p_platform_vars.opt_iocp_handle = null;
+    p_platform_vars.opt_hm_handle_to_overlapped = null;
 }
 
 ///////////////////////
