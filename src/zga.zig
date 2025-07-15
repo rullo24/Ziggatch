@@ -41,9 +41,11 @@ var error_buf: [SIZE_ERROR_QUEUE]anyerror = undefined;
 
 // represents a change to filesystem
 pub const ZGA_EVENT = struct {
-    name_buf: [MAX_PATH_SIZE]u8 = undefined, // holds the path
+    name_buf: [MAX_PATH_SIZE]u8 = undefined, // holds the path acted on (new path if changed name)
     name_len: usize = 0, // holds the valid byte len of name_buf
-    zga_flags: u32 = 0x0,
+    event_zga_flags: u32 = 0x0,
+    name_buf_old: [MAX_PATH_SIZE]u8 = undefined, // only holds data if name change occurred
+    name_len_old: usize = 0, // only >0 if name change occurred
 };
 
 // object used for concurrently capturing file changes

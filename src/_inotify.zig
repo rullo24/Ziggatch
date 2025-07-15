@@ -190,7 +190,7 @@ pub fn watchdogRead(p_platform_vars: *INOTIFY_VARS, zga_flags: u32, p_event_queu
         } else {
             // adding the event to the global queue --> for processing in ZGA
             var zga_curr_event: zga.ZGA_EVENT = .{}; // def vals
-            zga_curr_event.zga_flags = zga_flags; // --> zga_flags set by response on Linux version (in lines below)
+            zga_curr_event.event_zga_flags = zga_flags; // --> zga_flags set by response on Linux version (in lines below)
 
             if (p_platform_vars.opt_hm_wd_to_path) |*p_hm_wd_to_path| {
 
@@ -219,7 +219,7 @@ pub fn watchdogRead(p_platform_vars: *INOTIFY_VARS, zga_flags: u32, p_event_queu
 
                 }
 
-                zga_curr_event.zga_flags = inotifyToZGAFlags(p_curr_event.mask); // converting inotify --> ZGA flags for cross-platform queue
+                zga_curr_event.event_zga_flags = inotifyToZGAFlags(p_curr_event.mask); // converting inotify --> ZGA flags for cross-platform queue
 
             } else return error.HM_WD_TO_PATH_NOT_INIT;
 
@@ -753,11 +753,11 @@ test "watchdogRead: Successfully reads and processes events" {
     try std.testing.expect(delete_event != null);
 
     // verify that create_event acts as expected
-    try std.testing.expect(create_event.?.zga_flags == zga.ZGA_CREATE);
+    try std.testing.expect(create_event.?.event_zga_flags == zga.ZGA_CREATE);
     try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "./test/wd_read_test_file_987654321.txt");
 
     // verify that delete_event acts as expected
-    try std.testing.expect(delete_event.?.zga_flags == zga.ZGA_DELETE);
+    try std.testing.expect(delete_event.?.event_zga_flags == zga.ZGA_DELETE);
     try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "./test/wd_read_test_file_987654321.txt");
 }
 
@@ -796,11 +796,11 @@ test "watchdogRead: Successfully reads and processes multiple of the same events
         try std.testing.expect(delete_event != null);
 
         // verify that create_event acts as expected
-        try std.testing.expect(create_event.?.zga_flags == zga.ZGA_CREATE);
+        try std.testing.expect(create_event.?.event_zga_flags == zga.ZGA_CREATE);
         try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "./test/wd_read_test_file_987654321.txt");
 
         // verify that delete_event acts as expected
-        try std.testing.expect(delete_event.?.zga_flags == zga.ZGA_DELETE);
+        try std.testing.expect(delete_event.?.event_zga_flags == zga.ZGA_DELETE);
         try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "./test/wd_read_test_file_987654321.txt");   
 
         // Remove watchdog directory for next runthrough
@@ -930,6 +930,14 @@ test "watchdogDeinit: Succeeds if file descriptor already closed or invalid" {
 // PRIVATE FUNCTION TESTS //
 ////////////////////////////
 
-test "zgaTo..." {
+// inotifyToZGAFlags //
+
+test "inotifyToZGAFlags..." {
+
+}
+
+// ZGAToInotifyFlags //
+
+test "ZGAToInotifyFlags" {
 
 }

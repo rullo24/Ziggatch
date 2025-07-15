@@ -71,7 +71,7 @@ extern "kernel32" fn ResetEvent(hEvent: win32.HANDLE) callconv(.winapi) win32.BO
 pub fn watchdogInit(p_platform_vars: *WIN32_VARS, alloc: std.mem.Allocator) !void {
     if (p_platform_vars.opt_hm_handle_to_path != null) return error.HM_HANDLE_TO_PATH_INIT_ALREADY;
     if (p_platform_vars.opt_hm_path_to_handle != null) return error.HM_PATH_TO_HANDLE_INIT_ALREADY;
-    if (p_platform_vars.opt_hm_handle_to_overlapped != null) return error.HM_HANDLE_TO_OVERLAPPED_AKREADY_INIT;
+    if (p_platform_vars.opt_hm_handle_to_overlapped != null) return error.HM_HANDLE_TO_OVERLAPPED_ALREADY_INIT;
     if (p_platform_vars.opt_iocp_handle != null) return error.IOCP_HANDLE_ALREADY_INIT;
 
     // init hashmap for storing watchdog ptrs
@@ -105,9 +105,13 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
     if (p_platform_vars.opt_iocp_handle == null) return error.IOCP_HANDLE_NOT_INIT;
 
     // checking if path is valid on target system
-    if (path.len >= zga.MAX_PATH_SIZE) return error.WIN32_PATH_TOO_LONG;
     const cwd: std.fs.Dir = std.fs.cwd();
+    if (path.len >= zga.MAX_PATH_SIZE) return error.WIN32_PATH_TOO_LONG;
     try cwd.access(path, .{});
+
+    // only directories allowed --> check if path is valid directory
+    var open_dir_res: std.fs.Dir = try cwd.openDir(path, .{}); // will fail if not a dir
+    open_dir_res.close(); 
 
     // grabbing UTF-16 Le path for windows funcs using only stack allocations
     var utf8_temp_buf: [zga.MAX_PATH_SIZE]u16 = undefined; // stack-allocated buffer for temporary conversions (only need half of this size --> leaving incase I've missed something)
@@ -147,7 +151,7 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
             } else return error.HM_HANDLE_TO_PATH_NOT_INIT;
 
             // grabbing windows flags from ZGA flags
-            const win32_flags: win32.FileNotifyChangeFilter = zgaToWin32Flags(flags);
+            const win32_flags: win32.FileNotifyChangeFilter = setupZGAToWin32Flags(flags);
             if (win32_flags == DEFAULT_WIN32_FLAGS) return error.INVALID_FLAGS_PARSED; // if no selections
 
             if (p_platform_vars.opt_hm_handle_to_overlapped) |*p_hm_handle_to_overlapped| {
@@ -168,7 +172,12 @@ pub fn watchdogAdd(p_platform_vars: *WIN32_VARS, path: []const u8, flags: u32) !
                     &p_ov_state.ov,
                     null, // no completion routine, since using IOCP
                 );
-                if (init_read_dir_res == win32.FALSE and win32.kernel32.GetLastError() != .IO_PENDING) return error.INVALID_INIT_READ_DIR;
+                const last_err: win32.Win32Error = win32.kernel32.GetLastError();
+                if (init_read_dir_res == win32.FALSE and last_err != .IO_PENDING) {
+                    const last_err_int: u16 = @intFromEnum(last_err);
+                    std.debug.print("Win32Error: {d}\n", .{last_err_int});
+                    return error.INVALID_INIT_READ_DIR;
+                }
             }
 
         } else return error.HM_PATH_TO_HANDLE_ALREADY_CONTAINS_PATH;
@@ -274,12 +283,23 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
                     const p_info_filename: [*]const u16 = @ptrFromInt(p_filename_int);
                     const name_utf16: []const u16 = p_info_filename[0..name_len_wchar];
 
-                    std.debug.print("{any}\n", .{name_utf16});
-
-                    // create and enqueue event
+                    // create event
                     var curr_event: zga.ZGA_EVENT = .{};
-                    curr_event.zga_flags = zga_flags;
                     curr_event.name_len = try std.unicode.utf16LeToUtf8(&curr_event.name_buf, name_utf16);
+
+                    // converting win32 action flags into ZGA flags for event
+                    const event_action_flag: u32 = info.Action;
+                    var event_zga_flags: u32 = 0x0; // used for bitwise comparison
+                    if ((event_action_flag & win32.FILE_ACTION_ADDED) != 0x0) event_zga_flags |= zga.ZGA_CREATE;
+                    if ((event_action_flag & win32.FILE_ACTION_REMOVED) != 0x0) event_zga_flags |= zga.ZGA_DELETE;
+                    if ((event_action_flag & win32.FILE_ACTION_MODIFIED) != 0x0) event_zga_flags |= zga.ZGA_MODIFIED;
+                    if ((event_action_flag & win32.FILE_ACTION_RENAMED_NEW_NAME) != 0x0 or (event_action_flag & win32.FILE_ACTION_RENAMED_OLD_NAME) != 0x0) {
+                        event_zga_flags |= zga.ZGA_MOVED;
+                        curr_event.name_len_old = try std.unicode.utf16LeToUtf8(&curr_event.name_buf, name_utf16);
+                    }
+                    curr_event.event_zga_flags = event_zga_flags; // setting event flags from win32 response
+
+                    // enqueue event
                     try p_event_queue.writeItem(curr_event);
 
                     // break if this is the final entry
@@ -288,7 +308,7 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
                 }
 
                 // extract win32 flags from ZGA bitmask
-                const win32_flags: win32.FileNotifyChangeFilter = zgaToWin32Flags(zga_flags);
+                const win32_flags: win32.FileNotifyChangeFilter = setupZGAToWin32Flags(zga_flags);
                 if (win32_flags == DEFAULT_WIN32_FLAGS) return error.INVALID_FLAGS_PARSED; // if no selections
 
                 // re-issue ReadDirectoryChangesW to continue watching
@@ -377,43 +397,56 @@ pub fn watchdogDeinit(p_platform_vars: *WIN32_VARS) void {
 // PRIVATE FUNCTIONS //
 ///////////////////////
 
-/// converts a Windows file change filter to a cross-platform ZGA event flag bitmask.
+/// converts a Windows file change filter to a cross-platform ZGA setup event flag bitmask.
 ///
 /// PARAMS:
-/// - `win32_flags`: A Windows file change filter structure.
-fn win32ToZGAFlags(win32_flags: win32.FileNotifyChangeFilter) u32 {
-    var zga_mask: u32 = 0x0;
+/// - `win32_setup_flags`: A Windows file change filter structure.
+fn setupWin32ToZGAFlags(win32_setup_flags: win32.FileNotifyChangeFilter) u32 {
+    var zga_setup_mask: u32 = 0x0;
 
     // ignoring irrelevant or non-used win32-specific constants
-    if (win32_flags.file_name == true) zga_mask |= zga.ZGA_MOVED;
-    if (win32_flags.dir_name == true) zga_mask |= zga.ZGA_MOVED;
-    if (win32_flags.attributes == true) zga_mask |= zga.ZGA_ATTRIB;
-    if (win32_flags.size == true) zga_mask |= zga.ZGA_MODIFIED;
-    if (win32_flags.last_write == true) zga_mask |= zga.ZGA_MODIFIED;
-    if (win32_flags.creation == true) zga_mask |= zga.ZGA_CREATE;
-    if (win32_flags.last_access == true) zga_mask |= zga.ZGA_ACCESSED;
+    if (win32_setup_flags.file_name == true) zga_setup_mask |= zga.ZGA_MOVED;
+    if (win32_setup_flags.dir_name == true) zga_setup_mask |= zga.ZGA_MOVED;
+
+    if (win32_setup_flags.attributes == true) zga_setup_mask |= zga.ZGA_ATTRIB;
+
+    if (win32_setup_flags.size == true) zga_setup_mask |= zga.ZGA_MODIFIED;
+    if (win32_setup_flags.last_write == true) zga_setup_mask |= zga.ZGA_MODIFIED;
+
+    if (win32_setup_flags.creation == true) zga_setup_mask |= zga.ZGA_CREATE;
+
+    if (win32_setup_flags.last_access == true) zga_setup_mask |= zga.ZGA_ACCESSED;
+
     // don't check for security (currently not avail in ZGA)
 
-    return zga_mask;
+    return zga_setup_mask;
 }
 
-/// converts a ZGA event flag bitmask into a Windows-compatible file change filter.
+/// converts a ZGA event setup flag bitmask into a Windows-compatible file change filter.
 ///
 /// PARAMS:
-/// - `zga_mask`: A bitmask composed of ZGA event flags.
-fn zgaToWin32Flags(zga_mask: u32) win32.FileNotifyChangeFilter {
-    var win32_flags: win32.FileNotifyChangeFilter = .{};
+/// - `zga_setup_mask`: A bitmask composed of ZGA event flags.
+fn setupZGAToWin32Flags(zga_setup_mask: u32) win32.FileNotifyChangeFilter {
+    var win32_setup_flags: win32.FileNotifyChangeFilter = .{};
 
-    if ((zga_mask & zga.ZGA_MOVED) != 0) win32_flags.file_name = true;
-    if ((zga_mask & zga.ZGA_MOVED) != 0) win32_flags.dir_name = true;
-    if ((zga_mask & zga.ZGA_ATTRIB) != 0) win32_flags.attributes = true;
-    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_flags.size = true;
-    if ((zga_mask & zga.ZGA_MODIFIED) != 0) win32_flags.last_write = true; 
-    if ((zga_mask & zga.ZGA_ACCESSED) != 0) win32_flags.last_access = true;
-    if ((zga_mask & zga.ZGA_CREATE) != 0) win32_flags.creation = true;
-    // if ((zga_mask & zga.ZGA_SECURITY) != 0) win32_mask |= FILE_NOTIFY_CHANGE_SECURITY; // don't check for security (currently not avail in ZGA)
+    if ((zga_setup_mask & zga.ZGA_MOVED) != 0) win32_setup_flags.file_name = true;
+    if ((zga_setup_mask & zga.ZGA_MOVED) != 0) win32_setup_flags.dir_name = true;
+    
+    if ((zga_setup_mask & zga.ZGA_ATTRIB) != 0) win32_setup_flags.attributes = true;
 
-    return win32_flags;
+    if ((zga_setup_mask & zga.ZGA_MODIFIED) != 0) win32_setup_flags.size = true;
+    if ((zga_setup_mask & zga.ZGA_MODIFIED) != 0) win32_setup_flags.last_write = true; 
+
+    if ((zga_setup_mask & zga.ZGA_ACCESSED) != 0) win32_setup_flags.last_access = true;
+
+    if ((zga_setup_mask & zga.ZGA_CREATE) != 0) win32_setup_flags.creation = true;
+
+    if ((zga_setup_mask & zga.ZGA_DELETE) != 0) win32_setup_flags.file_name = true;
+    if ((zga_setup_mask & zga.ZGA_DELETE) != 0) win32_setup_flags.dir_name = true;
+
+    // don't check for security (currently not avail in ZGA)
+
+    return win32_setup_flags;
 }
 
 ///////////////////////////
@@ -422,7 +455,7 @@ fn zgaToWin32Flags(zga_mask: u32) win32.FileNotifyChangeFilter {
 
 // watchdogInit //
 
-test "watchdogInit: inits empty internal hashmaps" {
+test "watchdogInit: inits internal hashmaps" {
     // create wd object
     var wd: zga.ZGA_WATCHDOG = .{};
     const alloc: std.mem.Allocator = std.testing.allocator;
@@ -430,6 +463,8 @@ test "watchdogInit: inits empty internal hashmaps" {
     // - Expect hashmaps to be null before
     try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path == null);
     try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle == null);
+    try std.testing.expect(wd.platform_vars.opt_iocp_handle == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_overlapped == null);
 
     // - Call watchdogInit
     try watchdogInit(&wd.platform_vars, alloc);
@@ -437,10 +472,87 @@ test "watchdogInit: inits empty internal hashmaps" {
     // - Expect hashmaps to be non-null after
     try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path != null);
     try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle != null);
+    try std.testing.expect(wd.platform_vars.opt_iocp_handle != null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_overlapped != null);
 
     // - Test error on double init
     const res2 = watchdogInit(&wd.platform_vars, alloc);
     try std.testing.expectError(error.HM_HANDLE_TO_PATH_INIT_ALREADY, res2);
+}
+
+test "watchdogInit: fails if path to handle hashmap pre-configured" {
+    // create wd object
+    var wd: zga.ZGA_WATCHDOG = .{};
+    const alloc: std.mem.Allocator = std.testing.allocator;
+
+    var path_to_handle_hm = std.StringHashMap(win32.HANDLE).init(alloc);
+    errdefer path_to_handle_hm.deinit();
+    wd.platform_vars.opt_hm_path_to_handle = path_to_handle_hm;
+
+    // - Expect hashmaps to be null before
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle != null);
+    try std.testing.expect(wd.platform_vars.opt_iocp_handle == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_overlapped == null);
+
+    const result = watchdogInit(&wd.platform_vars, alloc);
+    try std.testing.expectError(error.HM_PATH_TO_HANDLE_INIT_ALREADY, result);
+}
+
+test "watchdogInit: fails if handle to path hashmap pre-configured" {
+    // create wd object
+    var wd: zga.ZGA_WATCHDOG = .{};
+    const alloc: std.mem.Allocator = std.testing.allocator;
+
+    var handle_to_path_hm = std.AutoHashMap(win32.HANDLE, []const u8).init(alloc);
+    errdefer handle_to_path_hm.deinit();
+    wd.platform_vars.opt_hm_handle_to_path = handle_to_path_hm;
+
+    // - Expect hashmaps to be null before
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path != null);
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle == null);
+    try std.testing.expect(wd.platform_vars.opt_iocp_handle == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_overlapped == null);
+
+    const result = watchdogInit(&wd.platform_vars, alloc);
+    try std.testing.expectError(error.HM_HANDLE_TO_PATH_INIT_ALREADY, result);
+}
+
+test "watchdogInit: fails if handle to ov hashmap pre-configured" {
+    // create wd object
+    var wd: zga.ZGA_WATCHDOG = .{};
+    const alloc: std.mem.Allocator = std.testing.allocator;
+
+    var handle_to_overlapped_hm = std.AutoHashMap(win32.HANDLE, OVERLAPPED_STATE).init(alloc);
+    errdefer handle_to_overlapped_hm.deinit();
+    wd.platform_vars.opt_hm_handle_to_overlapped = handle_to_overlapped_hm;
+
+    // - Expect hashmaps to be null before
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_overlapped != null);
+    try std.testing.expect(wd.platform_vars.opt_iocp_handle == null);
+
+    const result = watchdogInit(&wd.platform_vars, alloc);
+    try std.testing.expectError(error.HM_HANDLE_TO_OVERLAPPED_ALREADY_INIT, result);
+}
+
+test "watchdogInit: fails if IOCP handle pre-configured" {
+    // create wd object
+    var wd: zga.ZGA_WATCHDOG = .{};
+    const alloc: std.mem.Allocator = std.testing.allocator;
+
+    const iocp: win32.HANDLE = win32.kernel32.CreateIoCompletionPort(win32.INVALID_HANDLE_VALUE, null, 0x0, 0) orelse return error.IOCP_FAILED_INIT;
+    wd.platform_vars.opt_iocp_handle = iocp;
+    
+    // - Expect hashmaps to be null before
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_overlapped == null);
+    try std.testing.expect(wd.platform_vars.opt_iocp_handle != null);
+
+    const result = watchdogInit(&wd.platform_vars, alloc);
+    try std.testing.expectError(error.IOCP_HANDLE_ALREADY_INIT, result);
 }
 
 // watchdogAdd //
@@ -469,8 +581,6 @@ test "watchdogAdd: successfully adds a valid path" {
     defer watchdogDeinit(&wd.platform_vars);
 
     // - Create temporary test directory
-    // const tmp_dir: std.testing.TmpDir = std.testing.tmpDir(.{});
-    // const tmp_dir_loc: []const u8 = &tmp_dir.sub_path;
     const tmp_dir_loc: []const u8 = "./test";
 
     // - Add directory path
@@ -550,7 +660,7 @@ test "watchdogAdd: invalid path provided (length not of valid path length)" {
     defer watchdogDeinit(&wd.platform_vars);
 
     // - Add invalid path w/ length > win32.PATH_MAX_WIDE (win32 --> must be greater than 37,767 bytes)
-    const buf: []u8 = try alloc.alloc(u8, zga.MAX_PATH_SIZE);
+    const buf: []u8 = try alloc.alloc(u8, 37_768);
     defer alloc.free(buf);
     for (buf) |*p_c| p_c.* = 'A'; // setting all values in buffer to 'A' (x100_000)
     try std.testing.expectEqualStrings(buf[0..10], "AAAAAAAAAA");
@@ -576,6 +686,30 @@ test "watchdogAdd: path not valid on target system" {
     try std.testing.expectError(error.FileNotFound, result);
 }
 
+test "watchdogAdd: path is not a valid directory" {
+    // - Init watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
+    // Attempt to add file
+    const result = watchdogAdd(&wd.platform_vars, "./test/test_file2.txt", zga.ZGA_CREATE);
+    try std.testing.expectError(error.NotDir, result);
+}
+
+test "watchdogAdd: adding multiple directories to watch" {
+    // - Init watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
+    // Attempt to add multiple directories for watching
+    try watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_ACCESSED);
+    try watchdogAdd(&wd.platform_vars, "./ref", zga.ZGA_ACCESSED);
+}
+
 // watchdogRemove //
 
 test "watchdogRemove: fails if not initialized" {
@@ -583,7 +717,7 @@ test "watchdogRemove: fails if not initialized" {
     var wd: zga.ZGA_WATCHDOG = .{};
 
     // - Try to remove path, check for error
-    const result = watchdogRemove(&wd.platform_vars, "./test/test_file1.txt");
+    const result = watchdogRemove(&wd.platform_vars, "./test");
 
     // Should return error for uninit wd
     try std.testing.expectError(error.HM_HANDLE_TO_PATH_NOT_INIT, result);
@@ -597,7 +731,7 @@ test "watchdogRemove: fails if path does not exist" {
     defer watchdogDeinit(&wd.platform_vars);
 
     // - Remove path not added
-    const result = watchdogRemove(&wd.platform_vars, "./test/test_file1.txt");
+    const result = watchdogRemove(&wd.platform_vars, "./test");
 
     // - Check for correct error
     try std.testing.expectError(error.HM_DOES_NOT_CONTAIN_PATH, result);
@@ -611,32 +745,36 @@ test "watchdogRemove: removes valid path and handle" {
     defer watchdogDeinit(&wd.platform_vars);
 
     // - Add path
-    try watchdogAdd(&wd.platform_vars, "./test/test_file1.txt", zga.ZGA_CREATE);
+    try watchdogAdd(&wd.platform_vars, "./test", zga.ZGA_CREATE);
 
     // - Ensure that hashmaps are valid
     try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle != null);
     try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path != null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_overlapped != null);
+    try std.testing.expect(wd.platform_vars.opt_iocp_handle != null);
 
     // - Ensure entries added to hashmap
-    const result1 = wd.platform_vars.opt_hm_path_to_handle.?.get("./test/test_file1.txt");
+    const result1 = wd.platform_vars.opt_hm_path_to_handle.?.get("./test");
     try std.testing.expect(result1 != null);
     const result2 = wd.platform_vars.opt_hm_handle_to_path.?.get(result1.?);
     try std.testing.expect(result2 != null);
     
-    // storing handle for check later (after free)
-    const handle_slice = try alloc.alloc(win32.HANDLE, 1);
+    // storing handle for check later (after watchdogRemove call)
+    const handle_slice: []win32.HANDLE = try alloc.alloc(win32.HANDLE, 1);
     defer alloc.free(handle_slice);
     @memset(handle_slice, result1.?);
     
     // - Remove path
-    try watchdogRemove(&wd.platform_vars, "./test/test_file1.txt");
+    try watchdogRemove(&wd.platform_vars, "./test");
 
     // - Ensure that hashmaps are still valid
     try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle != null);
     try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path != null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_overlapped != null);
+    try std.testing.expect(wd.platform_vars.opt_iocp_handle != null);
 
     // - Ensure entries removed from hashmaps (and handle closed)
-    const result3 = wd.platform_vars.opt_hm_path_to_handle.?.get("./test/test_file1.txt");
+    const result3 = wd.platform_vars.opt_hm_path_to_handle.?.get("./test");
     try std.testing.expect(result3 == null);
     const result4 = wd.platform_vars.opt_hm_handle_to_path.?.get(handle_slice[0]);
     try std.testing.expect(result4 == null);
@@ -659,6 +797,12 @@ test "watchdogRead: fails if not initialized" {
 
     // - Pass uninit WIN32_VARS to watchdogRead
     const result = watchdogRead(&wd.platform_vars, zga.ZGA_CREATE, &event_queue, &error_queue);
+
+    // checking all optionals are not set after error
+    try std.testing.expect(wd.platform_vars.opt_hm_path_to_handle == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_path == null);
+    try std.testing.expect(wd.platform_vars.opt_hm_handle_to_overlapped == null);
+    try std.testing.expect(wd.platform_vars.opt_iocp_handle == null);
 
     // - Ensure correct error is returned
     try std.testing.expectError(error.HM_HANDLE_TO_PATH_NOT_INIT, result);
@@ -687,42 +831,77 @@ test "watchdogRead: returns valid events on change" {
     const tmp_dir_loc: []const u8 = try tmp_dir.parent_dir.realpath(".", tmp_dir_loc_buf[0..zga.MAX_PATH_SIZE]);
     
     // - Add path watcher
-    try watchdogAdd(&wd.platform_vars, tmp_dir_loc, zga.ZGA_CREATE | zga.ZGA_MOVED | zga.ZGA_ACCESSED);
+    try watchdogAdd(&wd.platform_vars, tmp_dir_loc, zga.ZGA_CREATE | zga.ZGA_DELETE);
 
-    // - Read events --> does not work like inotify version --> does not show previous events before call
+    // init variables for thread
+    var run_signal: bool = false; // trigger true to start thread functionality
+    var t_err: ?anyerror = null; // init to nothing --> set in thread if error occurs
+    const num_runs: usize = 1;
+    const cwd: std.fs.Dir = std.fs.cwd();
+    const filepath_to_act_on: []const u8 = try std.fmt.allocPrint(alloc, "{s}/threaded_temp_file.txt", .{tmp_dir_loc});
+    defer alloc.free(filepath_to_act_on);
+    const zga_flags: u32 = zga.ZGA_CREATE | zga.ZGA_DELETE;
+    const wait_time_ea_op_ms: u64 = 100; // large wait time to guarentee operation (remove operation speed constraints)
+
+    // spawn creation and deletion function in separate thread (to continue scoped procedure running)
+    const test_thread: std.Thread = try std.Thread.spawn(.{}, threadFileManipulation, .{&run_signal, &t_err, num_runs, cwd, filepath_to_act_on, zga_flags, wait_time_ea_op_ms});
+
+    // activate func in thread --> setting run flag
+    @atomicStore(bool, &run_signal, true, .seq_cst);
+
+    // 100 ms wait (in thread) before operations start to allow watchdogRead to setup //
+
+    // - Read creation event
     try watchdogRead(&wd.platform_vars, zga.ZGA_CREATE, &event_queue, &error_queue);
 
-    // Creating files to check against watchdogRead
-    const file_creation_path: []const u8 = try std.fmt.allocPrint(alloc, "{s}/threaded_temp_file.txt", .{tmp_dir_loc});
-    defer alloc.free(file_creation_path);
-    var cwd = std.fs.cwd();
-    const file = try cwd.createFile(file_creation_path, .{});
-    file.close();
-    _ = try cwd.deleteFile(file_creation_path);
+    // - Process creation event --> check if received correctly
+    const create_event = event_queue.readItem();
+    try std.testing.expect(create_event != null);
+    try std.testing.expect(create_event.?.event_zga_flags == zga.ZGA_CREATE);
+    try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "./test/threaded_temp_file.tmp");
 
-    // // - Pull events from the queue --> checking that they exist
-    // const create_event = event_queue.readItem();
-    // try std.testing.expect(create_event != null);
-    // const delete_event = event_queue.readItem();
-    // try std.testing.expect(delete_event != null);
+    // - Read deletion event
+    try watchdogRead(&wd.platform_vars, zga.ZGA_DELETE, &event_queue, &error_queue);
 
-    // // - Verify that create_event acts as expected
-    // try std.testing.expect(create_event.?.zga_flags == zga.ZGA_CREATE);
-    // try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "./test/wd_read_test_file_987654321.txt");
+    // - Process deletion event --> check if received correctly
+    const delete_event = event_queue.readItem();
+    try std.testing.expect(delete_event != null);
+    try std.testing.expect(delete_event.?.event_zga_flags == zga.ZGA_DELETE);
+    try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "./test/threaded_temp_file.tmp");   
 
-    // // - Verify that delete_event acts as expected
-    // try std.testing.expect(delete_event.?.zga_flags == zga.ZGA_DELETE);
-    // try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "./test/wd_read_test_file_987654321.txt");   
+    // join thread back --> would have joined by itself anyways
+    test_thread.join();
+
+    // check that no errors have occurred in error buffer
+    try std.testing.expect(t_err == null);
 }
 
 test "watchdogRead: Successfully reads and processes multiple of the same events after deactivation and reactivation" {
+
+
+
+
 
 }
 
 test "watchdogRead: returns correct zga_flags" {
     // - Add path with specific zga_flags
+
+
     // - Make appropriate changes (e.g., rename, write)
+
+
     // - Validate that event.zga_flags matches expected ones
+
+
+}
+
+test "watchdogRead: all flags being returned as expect" {
+
+
+
+
+
 }
 
 // watchdogList //
@@ -750,16 +929,16 @@ test "watchdogDeinit: cleans up all handles and hashmaps" {
 // PRIVATE FUNCTION TESTS //
 ////////////////////////////
 
-// zgaToWin32Flags //
+// setupZGAToWin32Flags //
 
-test "zgaToWin32Flags: converts ZGA flags to correct Win32 filter" {
+test "setupZGAToWin32Flags: converts ZGA flags to correct Win32 filter" {
     // - Provide ZGA flags
     // - Verify each corresponding Win32 field is set correctly
 }
 
-// win32ToZGAFlags //
+// setupWin32ToZGAFlags //
 
-test "win32ToZGAFlags: converts Win32 filter to correct ZGA flags" {
+test "setupWin32ToZGAFlags: converts Win32 filter to correct ZGA flags" {
     // - Provide Win32 flags
     // - Verify returned ZGA bitmask matches
 }
@@ -768,3 +947,124 @@ test "win32ToZGAFlags: converts Win32 filter to correct ZGA flags" {
 // TEST FUNCTIONS //
 ////////////////////
 
+/// Simulates filesystem changes based on provided ZGA flags (for testing).
+/// 
+/// PARAMS:
+/// - `p_run_signal` - Pointer to a flag that signals when the thread should begin execution. Retriggers to false upon completion.
+/// - `p_err` - Pointer to the error that occurred (if so) --> should be zero on init
+/// - `num_runs` - Number of times to repeat the operation.
+/// - `cwd` - Directory handle to operate in.
+/// - `filepath_to_act_on` - Relative path to the file being manipulated.
+/// - `zga_flags` - Bitmask of ZGA flags that determine which actions to perform
+/// - `wait_time_ea_op_ms` - Wait time between each operation (to guarentee no missed events)
+fn threadFileManipulation(p_run_signal: *bool, p_err: *?anyerror, num_runs: usize, cwd: std.fs.Dir, filepath_to_act_on: []const u8, zga_flags: u32, wait_time_ea_op_ms: u64) void {
+    while (@atomicLoad(bool, p_run_signal, .seq_cst) == false) {} // spin-wait until p_run_signal == true 
+
+    /////////////////////////////////////////////
+    // start_flag externally set by this point //
+    /////////////////////////////////////////////
+    
+    // iterate num_run times --> defined by user
+    for (0..num_runs) |_| {
+
+        // acting on ZGA_CREATE (creation change)
+        if ((zga_flags & zga.ZGA_CREATE) != 0x0) {
+            std.time.sleep(std.time.ns_per_ms * wait_time_ea_op_ms);
+
+            const p_file: std.fs.File = cwd.createFile(filepath_to_act_on, .{}) catch |err| {
+                std.debug.print("threadFileManipulation() Error (ZGA_CREATE): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+            p_file.close();
+        }
+
+        // acting on ZGA_MOVED (file_name, dir_name change)
+        if ((zga_flags & zga.ZGA_MOVED) != 0x0) {
+            std.time.sleep(std.time.ns_per_ms * wait_time_ea_op_ms);
+
+            const new_name = "renamed_test_file.tmp";
+            cwd.rename(filepath_to_act_on, new_name) catch |err| {
+                std.debug.print("threadFileManipulation() Error (ZGA_MOVED): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+
+            // rename back to original to allow further iterations
+            cwd.rename(new_name, filepath_to_act_on) catch |err| {
+                std.debug.print("threadFileManipulation() Error (ZGA_MOVED): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+
+        }
+
+        // acting on ZGA_ATTRIB (attributes change)
+        if ((zga_flags & zga.ZGA_ATTRIB) != 0x0) {
+            std.time.sleep(std.time.ns_per_ms * wait_time_ea_op_ms);
+
+            // This is a no-op in Zig stdlib, but touching mod time is close enough
+            const p_file: std.fs.File = cwd.openFile(filepath_to_act_on, .{ .mode = .read_write }) catch |err| {
+                std.debug.print("threadFileManipulation() Error (ZGA_ATTRIB): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+            defer p_file.close();
+            _ = p_file.writeAll("") catch |err| { // simulate with dummy write
+                std.debug.print("threadFileManipulation() Error (ZGA_ATTRIB): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+        }
+
+        // acting on ZGA_MODIFIED (size or last_write change)
+        if ((zga_flags & zga.ZGA_MODIFIED) != 0x0) {
+            std.time.sleep(std.time.ns_per_ms * wait_time_ea_op_ms);
+
+            const p_file = cwd.openFile(filepath_to_act_on, .{ .mode = .read_write }) catch |err| {
+                std.debug.print("threadFileManipulation() Error (ZGA_MODIFIED): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+            defer p_file.close();
+            p_file.writeAll("modified\n") catch |err| {
+                std.debug.print("threadFileManipulation() Error (ZGA_MODIFIED): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+        }
+
+        // acting on ZGA_ACCESSED (last_access change)
+        if ((zga_flags & zga.ZGA_ACCESSED) != 0x0) {
+            std.time.sleep(std.time.ns_per_ms * wait_time_ea_op_ms);
+
+            const p_file: std.fs.File = cwd.openFile(filepath_to_act_on, .{}) catch |err| {
+                std.debug.print("threadFileManipulation() Error (ZGA_ACCESSED): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+            defer p_file.close();
+            var buf: [8]u8 = undefined;
+            _ = p_file.readAll(&buf) catch |err| {
+                std.debug.print("threadFileManipulation() Error (ZGA_ACCESSED): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+
+        }
+
+        // acting on ZGA_DELETE (file_name, dir_name change)
+        if ((zga_flags & zga.ZGA_DELETE) != 0x0) { 
+            std.time.sleep(std.time.ns_per_ms * wait_time_ea_op_ms);
+
+            cwd.deleteFile(filepath_to_act_on) catch |err| {
+                std.debug.print("threadFileManipulation() Error (ZGA_DELETE): {s}", .{@errorName(err)});
+                p_err.* = err;
+                return;
+            };
+        }
+    }
+
+    // reset external signal flag to notify external function of finish
+    @atomicStore(bool, p_run_signal, false, .seq_cst); // signal completion to external thread
+}
