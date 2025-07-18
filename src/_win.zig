@@ -289,15 +289,25 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
 
                     // converting win32 action flags into ZGA flags for event
                     const event_action_flag: u32 = info.Action;
-                    var event_zga_flags: u32 = 0x0; // used for bitwise comparison
-                    if ((event_action_flag & win32.FILE_ACTION_ADDED) != 0x0) event_zga_flags |= zga.ZGA_CREATE;
-                    if ((event_action_flag & win32.FILE_ACTION_REMOVED) != 0x0) event_zga_flags |= zga.ZGA_DELETE;
-                    if ((event_action_flag & win32.FILE_ACTION_MODIFIED) != 0x0) event_zga_flags |= zga.ZGA_MODIFIED;
-                    if ((event_action_flag & win32.FILE_ACTION_RENAMED_NEW_NAME) != 0x0 or (event_action_flag & win32.FILE_ACTION_RENAMED_OLD_NAME) != 0x0) {
-                        event_zga_flags |= zga.ZGA_MOVED;
-                        curr_event.name_len_old = try std.unicode.utf16LeToUtf8(&curr_event.name_buf, name_utf16);
+                    switch(event_action_flag) {
+                        win32.FILE_ACTION_ADDED => {
+                            curr_event.event_zga_flags |= zga.ZGA_CREATE;
+                        },
+                        win32.FILE_ACTION_REMOVED => {
+                            curr_event.event_zga_flags |= zga.ZGA_DELETE;
+                        },
+                        win32.FILE_ACTION_MODIFIED => {
+                            curr_event.event_zga_flags |= zga.ZGA_MODIFIED;
+                        },
+                        win32.FILE_ACTION_RENAMED_NEW_NAME,
+                        win32.FILE_ACTION_RENAMED_OLD_NAME => {
+                            curr_event.event_zga_flags |= zga.ZGA_MOVED;
+                            curr_event.name_len_old = try std.unicode.utf16LeToUtf8(&curr_event.name_buf, name_utf16);
+                        },
+                        else => {
+                            return error.Unknown_File_Action_Event;
+                        },
                     }
-                    curr_event.event_zga_flags = event_zga_flags; // setting event flags from win32 response
 
                     // enqueue event
                     try p_event_queue.writeItem(curr_event);
@@ -838,7 +848,7 @@ test "watchdogRead: returns valid events on change" {
     var t_err: ?anyerror = null; // init to nothing --> set in thread if error occurs
     const num_runs: usize = 1;
     const cwd: std.fs.Dir = std.fs.cwd();
-    const filepath_to_act_on: []const u8 = try std.fmt.allocPrint(alloc, "{s}/threaded_temp_file.txt", .{tmp_dir_loc});
+    const filepath_to_act_on: []const u8 = try std.fmt.allocPrint(alloc, "{s}/threaded_temp_file.tmp", .{tmp_dir_loc});
     defer alloc.free(filepath_to_act_on);
     const zga_flags: u32 = zga.ZGA_CREATE | zga.ZGA_DELETE;
     const wait_time_ea_op_ms: u64 = 100; // large wait time to guarentee operation (remove operation speed constraints)
@@ -857,17 +867,19 @@ test "watchdogRead: returns valid events on change" {
     // - Process creation event --> check if received correctly
     const create_event = event_queue.readItem();
     try std.testing.expect(create_event != null);
+ 
     try std.testing.expect(create_event.?.event_zga_flags == zga.ZGA_CREATE);
-    try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "./test/threaded_temp_file.tmp");
+    try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "threaded_temp_file.tmp");
 
-    // - Read deletion event
+    // // - Read deletion event
     try watchdogRead(&wd.platform_vars, zga.ZGA_DELETE, &event_queue, &error_queue);
 
-    // - Process deletion event --> check if received correctly
+    // // - Process deletion event --> check if received correctly
     const delete_event = event_queue.readItem();
     try std.testing.expect(delete_event != null);
+
     try std.testing.expect(delete_event.?.event_zga_flags == zga.ZGA_DELETE);
-    try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "./test/threaded_temp_file.tmp");   
+    try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "threaded_temp_file.tmp");   
 
     // join thread back --> would have joined by itself anyways
     test_thread.join();
