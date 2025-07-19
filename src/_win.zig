@@ -53,11 +53,6 @@ const OVERLAPPED_STATE = struct {
 // EXTERNAL FUNCTION DECLARATIONS //
 ////////////////////////////////////
 
-extern "kernel32" fn ReadDirectoryChangesW(hDirectory: win32.HANDLE, lpBuffer: win32.LPVOID, nBufferLength: win32.DWORD, 
-                                        bWatchSubtree: win32.BOOL, dwNotifyFilter: win32.DWORD, 
-                                        lpBytesReturned: ?*win32.DWORD, lpOverlapped: ?*win32.OVERLAPPED, lpCompletionRoutine: ?*const void,) callconv(.winapi) win32.BOOL;
-extern "kernel32" fn ResetEvent(hEvent: win32.HANDLE) callconv(.winapi) win32.BOOL;
-
 //////////////////////
 // PUBLIC FUNCTIONS //
 //////////////////////
@@ -295,6 +290,7 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
                         },
                         win32.FILE_ACTION_REMOVED => {
                             curr_event.event_zga_flags |= zga.ZGA_DELETE;
+                            curr_event.event_zga_flags |= zga.ZGA_MOVED;
                         },
                         win32.FILE_ACTION_MODIFIED => {
                             curr_event.event_zga_flags |= zga.ZGA_MODIFIED;
@@ -302,7 +298,7 @@ pub fn watchdogRead(p_platform_vars: *WIN32_VARS, zga_flags: u32, p_event_queue:
                         win32.FILE_ACTION_RENAMED_NEW_NAME,
                         win32.FILE_ACTION_RENAMED_OLD_NAME => {
                             curr_event.event_zga_flags |= zga.ZGA_MOVED;
-                            curr_event.name_len_old = try std.unicode.utf16LeToUtf8(&curr_event.name_buf, name_utf16);
+                            curr_event.name_len_old = try std.unicode.utf16LeToUtf8(&curr_event.name_buf_old, name_utf16);
                         },
                         else => {
                             return error.Unknown_File_Action_Event;
@@ -417,6 +413,9 @@ fn setupWin32ToZGAFlags(win32_setup_flags: win32.FileNotifyChangeFilter) u32 {
     // ignoring irrelevant or non-used win32-specific constants
     if (win32_setup_flags.file_name == true) zga_setup_mask |= zga.ZGA_MOVED;
     if (win32_setup_flags.dir_name == true) zga_setup_mask |= zga.ZGA_MOVED;
+
+    if (win32_setup_flags.file_name == true) zga_setup_mask |= zga.ZGA_DELETE;
+    if (win32_setup_flags.dir_name == true) zga_setup_mask |= zga.ZGA_DELETE;
 
     if (win32_setup_flags.attributes == true) zga_setup_mask |= zga.ZGA_ATTRIB;
 
@@ -836,7 +835,6 @@ test "watchdogRead: returns valid events on change" {
     // - Create temp directory for storing files
     var tmp_dir: std.testing.TmpDir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
-
     var tmp_dir_loc_buf: [zga.MAX_PATH_SIZE]u8 = undefined;
     const tmp_dir_loc: []const u8 = try tmp_dir.parent_dir.realpath(".", tmp_dir_loc_buf[0..zga.MAX_PATH_SIZE]);
     
@@ -851,34 +849,24 @@ test "watchdogRead: returns valid events on change" {
     const filepath_to_act_on: []const u8 = try std.fmt.allocPrint(alloc, "{s}/threaded_temp_file.tmp", .{tmp_dir_loc});
     defer alloc.free(filepath_to_act_on);
     const zga_flags: u32 = zga.ZGA_CREATE | zga.ZGA_DELETE;
-    const wait_time_ea_op_ms: u64 = 100; // large wait time to guarentee operation (remove operation speed constraints)
+    const wait_time_ea_op_ms: u64 = 0; // large wait time to guarentee operation (remove operation speed constraints)
 
     // spawn creation and deletion function in separate thread (to continue scoped procedure running)
     const test_thread: std.Thread = try std.Thread.spawn(.{}, threadFileManipulation, .{&run_signal, &t_err, num_runs, cwd, filepath_to_act_on, zga_flags, wait_time_ea_op_ms});
-
-    // activate func in thread --> setting run flag
     @atomicStore(bool, &run_signal, true, .seq_cst);
 
-    // 100 ms wait (in thread) before operations start to allow watchdogRead to setup //
-
-    // - Read creation event
+    // - Read creation event & process
     try watchdogRead(&wd.platform_vars, zga.ZGA_CREATE, &event_queue, &error_queue);
-
-    // - Process creation event --> check if received correctly
     const create_event = event_queue.readItem();
     try std.testing.expect(create_event != null);
- 
-    try std.testing.expect(create_event.?.event_zga_flags == zga.ZGA_CREATE);
+    try std.testing.expect((create_event.?.event_zga_flags & zga.ZGA_CREATE) == zga.ZGA_CREATE);
     try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "threaded_temp_file.tmp");
 
-    // // - Read deletion event
+    // - Read deletion event & process
     try watchdogRead(&wd.platform_vars, zga.ZGA_DELETE, &event_queue, &error_queue);
-
-    // // - Process deletion event --> check if received correctly
     const delete_event = event_queue.readItem();
     try std.testing.expect(delete_event != null);
-
-    try std.testing.expect(delete_event.?.event_zga_flags == zga.ZGA_DELETE);
+    try std.testing.expect((delete_event.?.event_zga_flags & zga.ZGA_DELETE) == zga.ZGA_DELETE);
     try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "threaded_temp_file.tmp");   
 
     // join thread back --> would have joined by itself anyways
@@ -889,14 +877,112 @@ test "watchdogRead: returns valid events on change" {
 }
 
 test "watchdogRead: Successfully reads and processes multiple of the same events after deactivation and reactivation" {
+    // init watchdog
+    const alloc: std.mem.Allocator = std.testing.allocator;
+    var wd: zga.ZGA_WATCHDOG = .{};
+    try watchdogInit(&wd.platform_vars, alloc);
+    defer watchdogDeinit(&wd.platform_vars);
+
+    // creating buffers for valid watchdogRead
+    const event_buf: []zga.ZGA_EVENT = try alloc.alloc(zga.ZGA_EVENT, zga.SIZE_EVENT_QUEUE);
+    defer alloc.free(event_buf);
+    const error_buf: []anyerror = try alloc.alloc(anyerror, zga.SIZE_ERROR_QUEUE);
+    defer alloc.free(error_buf);
+    var event_queue = std.fifo.LinearFifo(zga.ZGA_EVENT, .Slice).init(event_buf); // init the LinearFIFO 
+    var error_queue = std.fifo.LinearFifo(anyerror, .Slice).init(error_buf); // init the LinearFIFO 
+
+    // - Create temp directory for storing files
+    var tmp_dir: std.testing.TmpDir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    var tmp_dir_loc_buf: [zga.MAX_PATH_SIZE]u8 = undefined;
+    const tmp_dir_loc: []const u8 = try tmp_dir.parent_dir.realpath(".", tmp_dir_loc_buf[0..zga.MAX_PATH_SIZE]);
+    
+    // - Add path watcher
+    const watcher_flags: u32 = zga.ZGA_CREATE | zga.ZGA_DELETE | zga.ZGA_ACCESSED | zga.ZGA_ATTRIB | zga.ZGA_MODIFIED | zga.ZGA_MOVED;
+    try watchdogAdd(&wd.platform_vars, tmp_dir_loc, watcher_flags);
+
+    // init variables for thread
+    var run_signal: bool = false; // trigger true to start thread functionality
+    var t_err: ?anyerror = null; // init to nothing --> set in thread if error occurs
+    const num_runs: usize = 1;
+    const cwd: std.fs.Dir = std.fs.cwd();
+    const thread_filepath_to_act_on: []const u8 = try std.fmt.allocPrint(alloc, "{s}/threaded_temp_file.tmp", .{tmp_dir_loc});
+    defer alloc.free(thread_filepath_to_act_on);
+    const zga_flags: u32 = watcher_flags;
+    const wait_time_ea_op_ms: u64 = 0; // large wait time to guarentee operation (remove operation speed constraints)
+
+    // spawn creation and deletion function in separate thread (to continue scoped procedure running)
+    const test_thread_args = .{&run_signal, &t_err, num_runs, cwd, thread_filepath_to_act_on, zga_flags, wait_time_ea_op_ms};
+    const test_thread: std.Thread = try std.Thread.spawn(.{}, threadFileManipulation, test_thread_args);
+
+    // activate func in thread --> setting run flag
+    @atomicStore(bool, &run_signal, true, .seq_cst);
+
+    // - Read creation event & process
+    try watchdogRead(&wd.platform_vars, zga.ZGA_CREATE, &event_queue, &error_queue);
+    const create_event = event_queue.readItem();
+    try std.testing.expect(create_event != null);
+    try std.testing.expect((create_event.?.event_zga_flags & zga.ZGA_CREATE) == zga.ZGA_CREATE);
+    try std.testing.expectEqualStrings(create_event.?.name_buf[0..create_event.?.name_len], "threaded_temp_file.tmp");
+
+    // - Read moved event & process
+    try watchdogRead(&wd.platform_vars, zga.ZGA_MOVED, &event_queue, &error_queue);
+    const moved_event = event_queue.readItem();
+    try std.testing.expect(moved_event != null);
+    try std.testing.expect((moved_event.?.event_zga_flags & zga.ZGA_MOVED) == zga.ZGA_MOVED);
+    try std.testing.expectEqualStrings(moved_event.?.name_buf[0..moved_event.?.name_len], "threaded_temp_file.tmp");
+
+    // - Read attribute event & process
+    try watchdogRead(&wd.platform_vars, zga.ZGA_ATTRIB, &event_queue, &error_queue);
+    const attrib_event = event_queue.readItem();
+    try std.testing.expect(attrib_event != null);
+
+    std.debug.print("{x}\n", .{attrib_event.?.event_zga_flags});
+
+
+    // For some WEIRD reason, the threaded func is repeating 2x
 
 
 
 
 
+
+    // try std.testing.expect(attrib_event.?.event_zga_flags == zga.ZGA_ATTRIB);
+    // try std.testing.expectEqualStrings(attrib_event.?.name_buf[0..attrib_event.?.name_len], "threaded_temp_file.tmp");
+    
+    // - Read modified event & process
+    // try watchdogRead(&wd.platform_vars, zga.ZGA_MODIFIED, &event_queue, &error_queue);
+    // const modified_event = event_queue.readItem();
+    // try std.testing.expect(modified_event != null);
+    // try std.testing.expect(modified_event.?.event_zga_flags == zga.ZGA_MODIFIED);
+    // try std.testing.expectEqualStrings(modified_event.?.name_buf[0..modified_event.?.name_len], "threaded_temp_file.tmp");
+
+    // - Read accessed event & process
+    // try watchdogRead(&wd.platform_vars, zga.ZGA_ACCESSED, &event_queue, &error_queue);
+
+    // // - Process accessed event --> check if received correctly
+    // const accessed_event = event_queue.readItem();
+    // try std.testing.expect(accessed_event != null);
+    // try std.testing.expect(accessed_event.?.event_zga_flags == zga.ZGA_ACCESSED);
+    // try std.testing.expectEqualStrings(accessed_event.?.name_buf[0..accessed_event.?.name_len], "threaded_temp_file.tmp");
+
+    // - Read deletion event & process
+    // try watchdogRead(&wd.platform_vars, zga.ZGA_DELETE, &event_queue, &error_queue);
+
+    // // - Process deletion event --> check if received correctly
+    // const delete_event = event_queue.readItem();
+    // try std.testing.expect(delete_event != null);
+    // try std.testing.expect(delete_event.?.event_zga_flags == zga.ZGA_DELETE);
+    // try std.testing.expectEqualStrings(delete_event.?.name_buf[0..delete_event.?.name_len], "threaded_temp_file.tmp");   
+
+    // join thread back --> would have joined by itself anyways
+    test_thread.join();
+
+    // check that no errors have occurred in error buffer
+    try std.testing.expect(t_err == null);
 }
 
-test "watchdogRead: returns correct zga_flags" {
+test "watchdogRead: returns each correct zga_flag" {
     // - Add path with specific zga_flags
 
 
@@ -908,10 +994,10 @@ test "watchdogRead: returns correct zga_flags" {
 
 }
 
-test "watchdogRead: all flags being returned as expect" {
+test "watchdogRead: checking that certain traits are returned as MODIFIED instead of that trait" {
 
 
-
+    // need to find a solution for this
 
 
 }
@@ -941,18 +1027,259 @@ test "watchdogDeinit: cleans up all handles and hashmaps" {
 // PRIVATE FUNCTION TESTS //
 ////////////////////////////
 
-// setupZGAToWin32Flags //
-
-test "setupZGAToWin32Flags: converts ZGA flags to correct Win32 filter" {
-    // - Provide ZGA flags
-    // - Verify each corresponding Win32 field is set correctly
-}
-
 // setupWin32ToZGAFlags //
 
-test "setupWin32ToZGAFlags: converts Win32 filter to correct ZGA flags" {
-    // - Provide Win32 flags
-    // - Verify returned ZGA bitmask matches
+test "setupWin32ToZGAFlags: converts file_name and dir_name to ZGA_MOVED and ZGA_DELETE" {
+    const filter = win32.FileNotifyChangeFilter{
+        .file_name = true,
+        .dir_name = true,
+    };
+
+    const zga_mask: u32 = setupWin32ToZGAFlags(filter);
+
+    try std.testing.expect((zga_mask & zga.ZGA_MOVED) != 0);
+    try std.testing.expect((zga_mask & zga.ZGA_DELETE) != 0);
+
+    const expected_mask: u32 = zga.ZGA_MOVED | zga.ZGA_DELETE;
+    try std.testing.expect((zga_mask & ~expected_mask) == 0);
+}
+
+test "setupWin32ToZGAFlags: converts attributes to ZGA_ATTRIB" {
+    const filter = win32.FileNotifyChangeFilter{ .attributes = true };
+    const zga_mask = setupWin32ToZGAFlags(filter);
+
+    try std.testing.expect((zga_mask & zga.ZGA_ATTRIB) != 0);
+
+    const expected_mask: u32 = zga.ZGA_ATTRIB;
+    try std.testing.expect((zga_mask & ~expected_mask) == 0);
+}
+
+test "setupWin32ToZGAFlags: converts size and last_write to ZGA_MODIFIED" {
+    const filter = win32.FileNotifyChangeFilter{
+        .size = true,
+        .last_write = true,
+    };
+    const zga_mask = setupWin32ToZGAFlags(filter);
+
+    try std.testing.expect((zga_mask & zga.ZGA_MODIFIED) != 0);
+
+    const expected_mask: u32 = zga.ZGA_MODIFIED;
+    try std.testing.expect((zga_mask & ~expected_mask) == 0);
+}
+
+test "setupWin32ToZGAFlags: converts last_access to ZGA_ACCESSED" {
+    const filter = win32.FileNotifyChangeFilter{ .last_access = true };
+    const zga_mask = setupWin32ToZGAFlags(filter);
+
+    try std.testing.expect((zga_mask & zga.ZGA_ACCESSED) != 0);
+
+    const expected_mask: u32 = zga.ZGA_ACCESSED;
+    try std.testing.expect((zga_mask & ~expected_mask) == 0);
+}
+
+test "setupWin32ToZGAFlags: converts creation to ZGA_CREATE" {
+    const filter = win32.FileNotifyChangeFilter{ .creation = true };
+    const zga_mask = setupWin32ToZGAFlags(filter);
+
+    try std.testing.expect((zga_mask & zga.ZGA_CREATE) != 0);
+
+    const expected_mask: u32 = zga.ZGA_CREATE;
+    try std.testing.expect((zga_mask & ~expected_mask) == 0);
+}
+
+test "setupWin32ToZGAFlags: ignores unmapped Win32 flags" {
+    const filter = win32.FileNotifyChangeFilter{
+        .security = true,
+        .ea = true,
+        .stream_name = true,
+        .stream_size = true,
+        .stream_write = true,
+    };
+    const zga_mask = setupWin32ToZGAFlags(filter);
+
+    try std.testing.expect(zga_mask == 0);
+}
+
+test "setupWin32ToZGAFlags: converts all mapped Win32 flags to ZGA bitmask" {
+    const filter = win32.FileNotifyChangeFilter{
+        .file_name = true,
+        .dir_name = true,
+        .attributes = true,
+        .size = true,
+        .last_write = true,
+        .last_access = true,
+        .creation = true,
+    };
+    const zga_mask = setupWin32ToZGAFlags(filter);
+
+    const expected_mask: u32 = zga.ZGA_MOVED | zga.ZGA_DELETE | zga.ZGA_ATTRIB |
+                               zga.ZGA_MODIFIED | zga.ZGA_ACCESSED | zga.ZGA_CREATE;
+
+    try std.testing.expect(zga_mask == expected_mask);
+}
+
+// setupZGAToWin32Flags //
+
+test "setupZGAToWin32Flags: converts ALL ZGA flags to correct Win32 filter" {
+    // - Provide ZGA flags
+    const zga_setup_mask: u32 = zga.ZGA_ACCESSED | zga.ZGA_ATTRIB | zga.ZGA_CREATE | zga.ZGA_DELETE | zga.ZGA_MODIFIED | zga.ZGA_MOVED;
+    const win32_flags: win32.FileNotifyChangeFilter = setupZGAToWin32Flags(zga_setup_mask);
+
+    // - Verify each corresponding Win32 field is set correctly
+
+    // ZGA_MOVED
+    try std.testing.expect(win32_flags.file_name == true);
+    try std.testing.expect(win32_flags.dir_name == true);
+
+    // ZGA_ATTRIB
+    try std.testing.expect(win32_flags.attributes == true);
+
+    // ZGA_MODIFIED
+    try std.testing.expect(win32_flags.size == true);
+    try std.testing.expect(win32_flags.last_write == true);
+    
+    // ZGA_ACCESSED
+    try std.testing.expect(win32_flags.last_access == true);
+
+    // ZGA_CREATE
+    try std.testing.expect(win32_flags.creation == true);
+
+    // ZGA_DELETE
+    try std.testing.expect(win32_flags.file_name == true);
+    try std.testing.expect(win32_flags.dir_name == true);
+}
+
+test "setupZGAToWin32Flags: converts ZGA_MOVED to correct Win32 filter" {
+    // - Provide ZGA flags
+    const zga_setup_mask: u32 = zga.ZGA_MOVED;
+    const win32_flags: win32.FileNotifyChangeFilter = setupZGAToWin32Flags(zga_setup_mask);
+
+    // ZGA_MOVED
+    try std.testing.expect(win32_flags.file_name == true);
+    try std.testing.expect(win32_flags.dir_name == true);
+
+    // check all other flags are set to false
+    try std.testing.expect(win32_flags.attributes == false);
+    try std.testing.expect(win32_flags.creation == false);
+    try std.testing.expect(win32_flags.ea == false);
+    try std.testing.expect(win32_flags.last_access == false);
+    try std.testing.expect(win32_flags.last_write == false);
+    try std.testing.expect(win32_flags.security == false);
+    try std.testing.expect(win32_flags.size == false);
+    try std.testing.expect(win32_flags.stream_name == false);
+    try std.testing.expect(win32_flags.stream_size == false);
+    try std.testing.expect(win32_flags.stream_write == false);
+}
+
+test "setupZGAToWin32Flags: converts ZGA_ATTRIB to correct Win32 filter" {
+    // - Provide ZGA flags
+    const zga_setup_mask: u32 = zga.ZGA_ATTRIB;
+    const win32_flags: win32.FileNotifyChangeFilter = setupZGAToWin32Flags(zga_setup_mask);
+
+    // ZGA_ATTRIB 
+    try std.testing.expect(win32_flags.attributes == true);
+
+    // check all other flags are set to false
+    try std.testing.expect(win32_flags.file_name == false);
+    try std.testing.expect(win32_flags.dir_name == false);
+    try std.testing.expect(win32_flags.creation == false);
+    try std.testing.expect(win32_flags.ea == false);
+    try std.testing.expect(win32_flags.last_access == false);
+    try std.testing.expect(win32_flags.last_write == false);
+    try std.testing.expect(win32_flags.security == false);
+    try std.testing.expect(win32_flags.size == false);
+    try std.testing.expect(win32_flags.stream_name == false);
+    try std.testing.expect(win32_flags.stream_size == false);
+    try std.testing.expect(win32_flags.stream_write == false);
+}
+
+test "setupZGAToWin32Flags: converts ZGA_MODIFIED to correct Win32 filter" {
+    // - Provide ZGA flags
+    const zga_setup_mask: u32 = zga.ZGA_MODIFIED;
+    const win32_flags: win32.FileNotifyChangeFilter = setupZGAToWin32Flags(zga_setup_mask);
+
+    // ZGA_MODIFIED
+    try std.testing.expect(win32_flags.size == true);
+    try std.testing.expect(win32_flags.last_write == true);
+
+    // check all other flags are set to false
+    try std.testing.expect(win32_flags.file_name == false);
+    try std.testing.expect(win32_flags.dir_name == false);
+    try std.testing.expect(win32_flags.attributes == false);
+    try std.testing.expect(win32_flags.creation == false);
+    try std.testing.expect(win32_flags.ea == false);
+    try std.testing.expect(win32_flags.last_access == false);
+    try std.testing.expect(win32_flags.security == false);
+    try std.testing.expect(win32_flags.stream_name == false);
+    try std.testing.expect(win32_flags.stream_size == false);
+    try std.testing.expect(win32_flags.stream_write == false);
+}
+
+
+test "setupZGAToWin32Flags: converts ZGA_ACCESSED to correct Win32 filter" {
+    // - Provide ZGA flags
+    const zga_setup_mask: u32 = zga.ZGA_ACCESSED;
+    const win32_flags: win32.FileNotifyChangeFilter = setupZGAToWin32Flags(zga_setup_mask);
+
+    // ZGA_ACCESSED
+    try std.testing.expect(win32_flags.last_access == true);
+
+    // check all other flags are set to false
+    try std.testing.expect(win32_flags.size == false);
+    try std.testing.expect(win32_flags.last_write == false);
+    try std.testing.expect(win32_flags.file_name == false);
+    try std.testing.expect(win32_flags.dir_name == false);
+    try std.testing.expect(win32_flags.attributes == false);
+    try std.testing.expect(win32_flags.creation == false);
+    try std.testing.expect(win32_flags.ea == false);
+    try std.testing.expect(win32_flags.security == false);
+    try std.testing.expect(win32_flags.stream_name == false);
+    try std.testing.expect(win32_flags.stream_size == false);
+    try std.testing.expect(win32_flags.stream_write == false);
+}
+
+test "setupZGAToWin32Flags: converts ZGA_CREATE to correct Win32 filter" {
+    // - Provide ZGA flags
+    const zga_setup_mask: u32 = zga.ZGA_CREATE;
+    const win32_flags: win32.FileNotifyChangeFilter = setupZGAToWin32Flags(zga_setup_mask);
+
+    // ZGA_CREATE
+    try std.testing.expect(win32_flags.creation == true);
+
+    // check all other flags are set to false
+    try std.testing.expect(win32_flags.last_access == false);
+    try std.testing.expect(win32_flags.size == false);
+    try std.testing.expect(win32_flags.last_write == false);
+    try std.testing.expect(win32_flags.file_name == false);
+    try std.testing.expect(win32_flags.dir_name == false);
+    try std.testing.expect(win32_flags.attributes == false);
+    try std.testing.expect(win32_flags.ea == false);
+    try std.testing.expect(win32_flags.security == false);
+    try std.testing.expect(win32_flags.stream_name == false);
+    try std.testing.expect(win32_flags.stream_size == false);
+    try std.testing.expect(win32_flags.stream_write == false);
+}
+
+test "setupZGAToWin32Flags: converts ZGA_DELETE to correct Win32 filter" {
+    // - Provide ZGA flags
+    const zga_setup_mask: u32 = zga.ZGA_DELETE;
+    const win32_flags: win32.FileNotifyChangeFilter = setupZGAToWin32Flags(zga_setup_mask);
+
+    // ZGA_DELETE 
+    try std.testing.expect(win32_flags.file_name == true);
+    try std.testing.expect(win32_flags.dir_name == true);
+
+    // check all other flags are set to false
+    try std.testing.expect(win32_flags.last_access == false);
+    try std.testing.expect(win32_flags.size == false);
+    try std.testing.expect(win32_flags.last_write == false);
+    try std.testing.expect(win32_flags.attributes == false);
+    try std.testing.expect(win32_flags.creation == false);
+    try std.testing.expect(win32_flags.ea == false);
+    try std.testing.expect(win32_flags.security == false);
+    try std.testing.expect(win32_flags.stream_name == false);
+    try std.testing.expect(win32_flags.stream_size == false);
+    try std.testing.expect(win32_flags.stream_write == false);
 }
 
 ////////////////////
@@ -970,14 +1297,11 @@ test "setupWin32ToZGAFlags: converts Win32 filter to correct ZGA flags" {
 /// - `zga_flags` - Bitmask of ZGA flags that determine which actions to perform
 /// - `wait_time_ea_op_ms` - Wait time between each operation (to guarentee no missed events)
 fn threadFileManipulation(p_run_signal: *bool, p_err: *?anyerror, num_runs: usize, cwd: std.fs.Dir, filepath_to_act_on: []const u8, zga_flags: u32, wait_time_ea_op_ms: u64) void {
-    while (@atomicLoad(bool, p_run_signal, .seq_cst) == false) {} // spin-wait until p_run_signal == true 
 
-    /////////////////////////////////////////////
-    // start_flag externally set by this point //
-    /////////////////////////////////////////////
-    
     // iterate num_run times --> defined by user
     for (0..num_runs) |_| {
+        // spin-wait until p_run_signal == true 
+        while (@atomicLoad(bool, p_run_signal, .seq_cst) == false) {} 
 
         // acting on ZGA_CREATE (creation change)
         if ((zga_flags & zga.ZGA_CREATE) != 0x0) {
@@ -1008,7 +1332,6 @@ fn threadFileManipulation(p_run_signal: *bool, p_err: *?anyerror, num_runs: usiz
                 p_err.* = err;
                 return;
             };
-
         }
 
         // acting on ZGA_ATTRIB (attributes change)
@@ -1062,7 +1385,6 @@ fn threadFileManipulation(p_run_signal: *bool, p_err: *?anyerror, num_runs: usiz
                 p_err.* = err;
                 return;
             };
-
         }
 
         // acting on ZGA_DELETE (file_name, dir_name change)
@@ -1075,8 +1397,8 @@ fn threadFileManipulation(p_run_signal: *bool, p_err: *?anyerror, num_runs: usiz
                 return;
             };
         }
-    }
 
-    // reset external signal flag to notify external function of finish
-    @atomicStore(bool, p_run_signal, false, .seq_cst); // signal completion to external thread
+        // signal completion of current run iteration to external thread
+        @atomicStore(bool, p_run_signal, false, .seq_cst); 
+    }
 }
